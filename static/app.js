@@ -27,19 +27,19 @@ const HIGHLIGHT_FACETS = [
 ];
 
 const DEFAULT_HIGHLIGHT_COLORS = {
-  goal: "#72c9e8",
-  problem: "#72c9e8",
-  solution: "#4fb07a",
-  method: "#8ed6a8",
-  novelty: "#b8a8ea",
-  benchmarking: "#6fb4e8",
-  result: "#ffd36d",
-  ablation: "#caa66a",
-  hyperparams: "#8fa0a8",
-  tradeoff: "#f0a36f",
-  limitation: "#e99797",
-  failure: "#d86969",
-  important: "#b6bec3",
+  goal: "#0040ff",
+  problem: "#0040ff",
+  solution: "#00c000",
+  method: "#00ffff",
+  novelty: "#8000ff",
+  benchmarking: "#7a3e00",
+  result: "#ffd400",
+  ablation: "#80ff00",
+  hyperparams: "#404040",
+  tradeoff: "#ff7000",
+  limitation: "#ff00d4",
+  failure: "#ff002b",
+  important: "#808080",
 };
 
 const HIGHLIGHT_LABEL_ALIASES = {
@@ -79,6 +79,8 @@ const state = {
   providerModelOptions: {},
   chatMessages: [],
   renderToken: 0,
+  pdfDocument: null,
+  pdfLoadingTask: null,
   analysisPoll: null,
   figurePoll: null,
   uploadPromise: null,
@@ -106,9 +108,6 @@ const els = {
   pdfInput: document.getElementById("pdf-input"),
   providerSelect: document.getElementById("provider-select"),
   textModelInput: document.getElementById("text-model-input"),
-  textEffortSelect: document.getElementById("text-effort-select"),
-  visionModelInput: document.getElementById("vision-model-input"),
-  visionEffortSelect: document.getElementById("vision-effort-select"),
   apiKeyInput: document.getElementById("api-key-input"),
   analyzeButton: document.getElementById("analyze-button"),
   providerStatus: document.getElementById("provider-status"),
@@ -129,7 +128,10 @@ const els = {
   pdfZoomInButton: document.getElementById("pdf-zoom-in-button"),
   pdfZoomLabel: document.getElementById("pdf-zoom-label"),
   highlightCount: document.getElementById("highlight-count"),
+  highlightFilterStatus: document.getElementById("highlight-filter-status"),
   highlightFilters: document.getElementById("highlight-filters"),
+  previousHighlightButton: document.getElementById("previous-highlight-button"),
+  nextHighlightButton: document.getElementById("next-highlight-button"),
   highlightList: document.getElementById("highlight-list"),
   paperProvider: document.getElementById("paper-provider"),
   paperTitle: document.getElementById("paper-title"),
@@ -137,10 +139,12 @@ const els = {
   backgroundSection: document.getElementById("background-section"),
   backgroundNotes: document.getElementById("background-notes"),
   takeawaysTab: document.getElementById("takeaways-tab"),
+  chatStatus: document.getElementById("chat-status"),
   chatFigureFocus: document.getElementById("chat-figure-focus"),
   chatMessages: document.getElementById("chat-messages"),
   chatForm: document.getElementById("chat-form"),
   chatInput: document.getElementById("chat-input"),
+  chatResetButton: document.getElementById("chat-reset-button"),
   webToggle: document.getElementById("web-toggle"),
   selectionPopover: document.getElementById("selection-popover"),
   copySelectionButton: document.getElementById("copy-selection-button"),
@@ -225,7 +229,7 @@ function facetChipStyle(facet) {
   if (!color) {
     return "";
   }
-  return ` style="--facet-color: ${color}; --facet-bg: ${hexToRgba(color, 0.26)};"`;
+  return ` style="--facet-color: ${color}; --facet-bg: ${hexToRgba(color, 0.32)};"`;
 }
 
 function showToast(message, sticky = false) {
@@ -476,6 +480,24 @@ async function setPdfZoom(nextZoom) {
   syncPdfZoomControls();
 }
 
+function apiErrorMessage(payload, fallback) {
+  const detail = payload?.detail;
+  if (typeof detail === "string" && detail.trim()) {
+    return detail;
+  }
+  if (detail && typeof detail === "object") {
+    if (typeof detail.message === "string" && detail.message.trim()) {
+      return detail.message;
+    }
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
 async function requestJson(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
@@ -488,7 +510,7 @@ async function requestJson(url, options = {}) {
     }
   }
   if (!response.ok) {
-    throw new Error(payload.detail || response.statusText);
+    throw new Error(apiErrorMessage(payload, response.statusText));
   }
   return payload;
 }
@@ -509,12 +531,7 @@ function saveModelSettings() {
   } catch {
     stored = {};
   }
-  const settings = {
-    textModel: selectedTextModel(),
-    textEffort: selectedTextEffort(),
-    visionModel: selectedVisionModel(),
-    visionEffort: selectedVisionEffort(),
-  };
+  const settings = { textModel: selectedTextModel() };
   const providers = {
     ...(stored.providers || {}),
     [selectedProvider()]: settings,
@@ -606,7 +623,6 @@ function availableModels(settings, ...extraModels) {
     ...currentProviderModels(settings),
     ...extraModels,
     settings.default_text_model,
-    settings.default_vision_model,
   ]
     .map((model) => String(model || "").trim())
     .filter(Boolean);
@@ -635,19 +651,9 @@ function populateModelSelect(select, models, selected) {
 
 function setModelOptions(settings) {
   const stored = storedModelSettings();
-  const efforts = settings.reasoning_efforts?.length
-    ? settings.reasoning_efforts
-    : ["none", "low", "medium", "high", "xhigh"];
-  const textEffort = stored.textEffort || settings.default_reasoning_effort || "high";
-  const visionEffort = stored.visionEffort || settings.default_vision_reasoning_effort || textEffort;
   const providerModels = availableModels(settings);
   const textModel = stored.textModel || providerModels[0] || settings.default_text_model || "gpt-5.5";
-  const visionModel = stored.visionModel || providerModels[0] || settings.default_vision_model || textModel;
-  const models = availableModels(settings, textModel, visionModel);
-  populateModelSelect(els.textModelInput, models, textModel);
-  populateModelSelect(els.visionModelInput, models, visionModel);
-  populateEffortSelect(els.textEffortSelect, efforts, textEffort);
-  populateEffortSelect(els.visionEffortSelect, efforts, visionEffort);
+  populateModelSelect(els.textModelInput, providerModels, textModel);
 }
 
 function setProviderOptions(settings) {
@@ -691,7 +697,7 @@ function selectedVisionModel() {
 }
 
 function selectedTextEffort() {
-  return els.textEffortSelect?.value || state.settings?.default_reasoning_effort || "high";
+  return "high";
 }
 
 function selectedVisionEffort() {
@@ -724,10 +730,7 @@ function handleModelSelectChange(select, fallbackModel) {
 }
 
 function textModelRequestOptions() {
-  return {
-    model: selectedTextModel(),
-    reasoning_effort: selectedTextEffort(),
-  };
+  return { model: selectedTextModel() };
 }
 
 function visionModelRequestOptions() {
@@ -912,9 +915,6 @@ async function selectPaper(paperId) {
   setSelectedPaper(paper);
   await renderPdf(paper);
   pollPaperAnalysis(paper.id);
-  if (paper.figure_analysis_status === "running") {
-    pollFigureAnalysis(paper.id);
-  }
 }
 
 async function removePaper(paperId) {
@@ -937,14 +937,18 @@ async function removePaper(paperId) {
   showToast("Paper removed");
 }
 
-function setSelectedPaper(paper) {
+function setSelectedPaper(paper, { preserveWorkspace = false } = {}) {
   state.selectedPaper = paper;
-  state.chatMessages = [];
-  state.pendingCitationContext = null;
-  state.selectedFigures = [];
-  state.activeFigure = null;
-  state.activeHighlightIndex = null;
-  state.activeHighlightFacet = "all";
+  if (preserveWorkspace) {
+    syncSelectedFigures();
+  } else {
+    state.chatMessages = [];
+    state.pendingCitationContext = null;
+    state.selectedFigures = [];
+    state.activeFigure = null;
+    state.activeHighlightIndex = null;
+    state.activeHighlightFacet = "all";
+  }
   upsertPaperSummary(paper);
   syncPaperActions();
   renderPaperList();
@@ -954,6 +958,11 @@ function setSelectedPaper(paper) {
 }
 
 function clearSelectedPaper() {
+  state.renderToken += 1;
+  state.pdfLoadingTask?.destroy?.();
+  state.pdfLoadingTask = null;
+  state.pdfDocument?.destroy?.();
+  state.pdfDocument = null;
   state.selectedPaper = null;
   state.chatMessages = [];
   state.pageTexts = new Map();
@@ -1002,14 +1011,14 @@ function clearSelectedPaper() {
 }
 
 function syncPaperActions() {
-  const isAnalyzing = state.selectedPaper?.analysis_status === "analyzing";
+  const isAnalyzing = state.selectedPaper?.analysis_status === "analyzing" || state.selectedPaper?.reanalysis_status === "analyzing";
   const isFigureAnalyzing = state.figureAnalysisRunning || state.selectedPaper?.figure_analysis_status === "running";
   const isBusy = isAnalyzing || isFigureAnalyzing;
   const buttonLabel = isFigureAnalyzing
     ? "Analyzing figures"
     : isAnalyzing
       ? "Analyzing text"
-      : "Analyze";
+      : state.selectedPaper?.analysis_status === "complete" ? "Reanalyze" : "Analyze";
   syncPdfZoomControls();
   setLoadingButton(els.analyzeButton, Boolean(isBusy), buttonLabel);
   if (els.analyzeButton) {
@@ -1025,16 +1034,22 @@ function showReaderLoading() {
 
 function renderPaperDetails(paper) {
   state.summaryEvidenceTargets = [];
-  if (els.paperProvider) {
-    els.paperProvider.textContent = paper.provider_used || "unknown";
+  const chatAvailable = Boolean(paper.chat_available);
+  const reanalysisFailed = paper.reanalysis_status === "error";
+  if (els.chatStatus) {
+    els.chatStatus.textContent = reanalysisFailed
+      ? `Reanalysis failed: ${paper.reanalysis_error || "Unknown provider error."} The current analysis remains available.`
+      : chatAvailable
+        ? ""
+        : paper.analysis_status === "analyzing"
+        ? paper.analysis_stage || "Analysis in progress."
+        : paper.analysis_status === "error"
+          ? `Analysis failed: ${paper.analysis_error || "Unknown provider error."} Reanalyze to start chatting.`
+          : "Analyze this paper to start chatting.";
+    els.chatStatus.classList.toggle("hidden", chatAvailable && !reanalysisFailed);
   }
-  if (els.paperTitle) {
-    els.paperTitle.textContent = paper.title || paper.filename;
-  }
-  if (els.paperOverview) {
-    els.paperOverview.textContent = paper.overview || "";
-  }
-  renderBackgroundNotes(paper.background_notes || []);
+  if (els.chatInput) els.chatInput.disabled = !chatAvailable;
+  els.chatForm?.querySelectorAll("button").forEach((button) => { button.disabled = !chatAvailable; });
   const highlights = paper.highlights || [];
   if (
     state.activeHighlightFacet !== "all"
@@ -1043,31 +1058,26 @@ function renderPaperDetails(paper) {
     state.activeHighlightFacet = "all";
   }
   const visibleHighlights = filteredHighlights(highlights);
+  if (els.highlightFilterStatus) {
+    const filtered = state.activeHighlightFacet !== "all";
+    els.highlightFilterStatus.classList.toggle("hidden", !filtered);
+    els.highlightFilterStatus.innerHTML = filtered
+      ? `Showing a facet subset; this view is not a standalone narrative. <button data-show-full-narrative type="button">Show full narrative</button>`
+      : "";
+    els.highlightFilterStatus.querySelector?.("[data-show-full-narrative]")?.addEventListener("click", async () => {
+      state.activeHighlightFacet = "all";
+      renderPaperDetails(paper);
+      await refreshReaderAnnotations(paper);
+    });
+  }
   if (els.highlightCount) {
     els.highlightCount.textContent = state.activeHighlightFacet === "all"
       ? String(highlights.length)
       : `${visibleHighlights.length}/${highlights.length}`;
   }
-  if (paper.analysis_status === "analyzing") {
-    renderListPanel(els.takeawaysTab, ["Analysis is running. The PDF is ready to read now."]);
-  } else if (paper.analysis_status === "ready") {
-    renderListPanel(els.takeawaysTab, ["PDF loaded. Click Analyze when you want AI takeaways, highlights, and figure/table annotations."]);
-  } else if (paper.analysis_status === "error") {
-    renderListPanel(els.takeawaysTab, [paper.analysis_error || "Analysis failed."]);
-  } else {
-    renderListPanel(els.takeawaysTab, paper.key_takeaways || [], {
-      linkEvidence: true,
-      rowEvidence: true,
-      allowFigure: false,
-      showEvidence: false,
-      showHighlightLinks: false,
-      exactEvidence: true,
-      maxTokens: 320,
-      flash: true,
-    });
-  }
   renderHighlightFilters(highlights);
   renderHighlights(visibleHighlights);
+  syncHighlightNavigation();
 }
 
 function filteredHighlights(highlights) {
@@ -2034,27 +2044,33 @@ function renderHighlights(highlights) {
     return;
   }
 
-  setHtml(
-    els.highlightList,
-    highlights
-      .map((highlight, index) => {
-        const page = highlight.page_number ? `p. ${highlight.page_number}` : "unplaced";
-        const highlightIndex = highlight.highlightIndex ?? index;
-        const labelId = highlightLabelId(highlight.label);
-        const comment = highlight.comment
-          ? `<p class="highlight-comment">${escapeHtml(highlight.comment)}</p>`
-          : "";
-        return `
-        <button class="highlight-card" data-highlight-index="${highlightIndex}" type="button">
-          <span class="label label-${escapeHtml(labelId)}"${customHighlightStyle(highlight)}>${escapeHtml(highlightLabelText(highlight.label))}</span>
-          <strong>${escapeHtml(highlight.snippet)}</strong>
-          ${comment}
-          <small>${escapeHtml(page)} · ${escapeHtml(highlight.reason || "")}</small>
-        </button>
-      `;
-      })
-      .join(""),
-  );
+  let currentSection = null;
+  let manualHeadingShown = false;
+  const html = [];
+  highlights.forEach((highlight, index) => {
+    if (highlight.source === "manual" && !manualHeadingShown) {
+      html.push(`<div class="narrative-heading manual-heading"><strong>Manual highlights</strong><span>Personal evidence outside the standalone narrative.</span></div>`);
+      manualHeadingShown = true;
+    } else if (highlight.source !== "manual" && highlight.section_index !== currentSection) {
+      currentSection = highlight.section_index;
+      const heading = state.selectedPaper?.narrative_sections?.[currentSection]?.heading || "Narrative";
+      html.push(`<h3 class="narrative-heading">${escapeHtml(heading)}</h3>`);
+    }
+    const sourceStatus = highlight.navigation_available ? "" : `<small>Source unavailable</small>`;
+    const highlightIndex = highlight.highlightIndex ?? index;
+    const labelId = highlightLabelId(highlight.label);
+    const comment = highlight.comment
+      ? `<p class="highlight-comment">${escapeHtml(highlight.comment)}</p>`
+      : "";
+    html.push(`
+      <button class="highlight-card" data-highlight-index="${highlightIndex}" data-highlight-id="${escapeHtml(highlight.id || "")}" type="button">
+        <span class="label label-${escapeHtml(labelId)}"${customHighlightStyle(highlight)}>${escapeHtml(highlightLabelText(highlight.label))}</span>
+        <strong>${escapeHtml(highlight.text || highlight.snippet || "")}</strong>
+        ${sourceStatus}
+      </button>
+    `);
+  });
+  setHtml(els.highlightList, html.join(""));
 
   els.highlightList?.querySelectorAll("[data-highlight-index]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -2150,6 +2166,7 @@ function renderChatFigureFocus() {
     state.selectedFigures
       .map((figure) => `
         <span class="figure-focus-chip">
+          <img src="${escapeHtml(figure.image_url || "")}" alt="" />
           <span>${escapeHtml(figureTitle(figure))}</span>
           <button data-remove-chat-figure="${escapeHtml(figure.id)}" type="button" aria-label="Remove figure">×</button>
         </span>
@@ -2323,6 +2340,11 @@ function jumpToHighlight(highlightIndex) {
     return;
   }
   selectHighlight(highlightIndex);
+  syncHighlightNavigation();
+  if (!highlight.navigation_available) {
+    showToast("Source location unavailable for this verified passage");
+    return;
+  }
   const rect = els.pdfViewer?.querySelector(`[data-highlight-index="${highlightIndex}"]`);
   if (rect) {
     scrollReaderNodeIntoView(rect);
@@ -2331,6 +2353,31 @@ function jumpToHighlight(highlightIndex) {
   if (highlight.page_number) {
     jumpToPage(highlight.page_number);
   }
+}
+
+function visibleHighlightIndexes() {
+  return filteredHighlights(state.selectedPaper?.highlights || []).map((highlight) => highlight.highlightIndex);
+}
+
+function syncHighlightNavigation() {
+  const indexes = visibleHighlightIndexes();
+  const position = indexes.indexOf(state.activeHighlightIndex);
+  if (els.previousHighlightButton) {
+    els.previousHighlightButton.disabled = !indexes.length || position <= 0;
+  }
+  if (els.nextHighlightButton) {
+    els.nextHighlightButton.disabled = !indexes.length || position === indexes.length - 1;
+  }
+}
+
+function stepHighlight(delta) {
+  const indexes = visibleHighlightIndexes();
+  if (!indexes.length) return;
+  const position = indexes.indexOf(state.activeHighlightIndex);
+  const nextPosition = position < 0
+    ? (delta > 0 ? 0 : indexes.length - 1)
+    : Math.max(0, Math.min(indexes.length - 1, position + delta));
+  jumpToHighlight(indexes[nextPosition]);
 }
 
 function scrollReaderNodeIntoView(node, block = "center") {
@@ -2508,8 +2555,23 @@ async function renderPdf(paper, options = {}) {
     resetPaperViewport();
   }
 
-  const pdfDoc = await pdfjsLib.getDocument(`/api/papers/${paper.id}/file`).promise;
-  const pageHighlights = highlightsByPage(filteredHighlights(paper.highlights || []));
+  const previousDocument = state.pdfDocument;
+  const previousLoadingTask = state.pdfLoadingTask;
+  state.pdfDocument = null;
+  state.pdfLoadingTask = pdfjsLib.getDocument(`/api/papers/${paper.id}/file`);
+  previousLoadingTask?.destroy?.();
+  if (previousDocument) {
+    await previousDocument.destroy();
+  }
+  const pdfDoc = await state.pdfLoadingTask.promise;
+  if (token !== state.renderToken) {
+    await pdfDoc.destroy();
+    return;
+  }
+  state.pdfDocument = pdfDoc;
+  state.pdfLoadingTask = null;
+  const overlayHighlights = (paper.overlay_highlights || paper.highlights || []).map((highlight, index) => ({ ...highlight, highlightIndex: highlight.highlightIndex ?? index }));
+  const pageHighlights = highlightsByPage(overlayHighlights.filter((highlight) => highlight.origin === "manual" || state.activeHighlightFacet === "all" || highlightLabelId(highlight.label) === state.activeHighlightFacet));
   const pageCitations = citationsByPage(paper.citations);
   const pageFigures = figuresByPage(paper.figures || []);
   const pageSizes = new Map((paper.page_sizes || []).map((page) => [page.page_number, page]));
@@ -2622,7 +2684,8 @@ function renderPdfAnnotationOverlays(paper, options = {}) {
   const readerScrollLeft = els.readerPanel?.scrollLeft || 0;
   const readerScrollTop = els.readerPanel?.scrollTop || 0;
   const pageFigures = figuresByPage(paper.figures || []);
-  const pageHighlights = highlightsByPage(filteredHighlights(paper.highlights || []));
+  const overlayHighlights = (paper.overlay_highlights || paper.highlights || []).map((highlight, index) => ({ ...highlight, highlightIndex: highlight.highlightIndex ?? index }));
+  const pageHighlights = highlightsByPage(overlayHighlights.filter((highlight) => highlight.origin === "manual" || state.activeHighlightFacet === "all" || highlightLabelId(highlight.label) === state.activeHighlightFacet));
   const pageCitations = citationsByPage(paper.citations);
   const pageSizes = new Map((paper.page_sizes || []).map((page) => [page.page_number, page]));
 
@@ -2685,7 +2748,7 @@ function renderPageHighlights(overlay, highlights, pageSize, viewport) {
       const [x0, y0, x1, y1] = rect;
       const node = document.createElement("div");
       node.className = `highlight-rect label-${labelId}`;
-      node.title = `${highlightLabelText(highlight.label)}: ${highlight.comment || highlight.reason || highlight.snippet}`;
+      node.title = `${highlightLabelText(highlight.label)}: ${highlight.text || highlight.snippet || ""}`;
       node.dataset.highlightIndex = String(highlight.highlightIndex);
       if (safeHexColor(highlight.color) && color) {
         node.style.background = color;
@@ -2752,9 +2815,6 @@ function renderPageFigures(overlay, figures, viewport) {
     node.style.width = `${Math.max(14, ((right - left) / 100) * viewport.width)}px`;
     node.style.height = `${Math.max(14, ((bottom - top) / 100) * viewport.height)}px`;
 
-    const label = document.createElement("span");
-    label.textContent = figure.type || "visual";
-    node.appendChild(label);
     node.addEventListener("click", (event) => {
       event.stopPropagation();
       showFigurePopover(figure, node.getBoundingClientRect());
@@ -2825,10 +2885,18 @@ async function loadSelectedPaper() {
 
     const selectedPaper = uploadedPapers[0] || null;
     if (selectedPaper) {
-      setSelectedPaper(selectedPaper);
-      await renderPdf(selectedPaper);
+      if (state.selectedPaper?.id === selectedPaper.id && state.pdfDocument) {
+        applySelectedPaperUpdate(selectedPaper);
+        await refreshReaderAnnotations(selectedPaper);
+      } else {
+        setSelectedPaper(selectedPaper);
+        await renderPdf(selectedPaper);
+      }
     }
 
+    if (els.pdfInput) {
+      els.pdfInput.value = "";
+    }
     hideToast();
     showToast(
       files.length === 1
@@ -2864,6 +2932,10 @@ async function startSelectedPaperAnalysis(event) {
     return;
   }
 
+  const isReanalysis = paper.analysis_status === "complete";
+  if (isReanalysis && !window.confirm("Reanalysis replaces the generated narrative after a complete new analysis succeeds. Manual highlights will be preserved. Continue?")) {
+    return;
+  }
   showToast("Analysis is running. You can keep reading.", true);
   paper = await requestJson(`/api/papers/${paper.id}/analyze`, {
     method: "POST",
@@ -2871,14 +2943,21 @@ async function startSelectedPaperAnalysis(event) {
     body: JSON.stringify({
       provider: selectedProvider(),
       api_key: requestApiKey() || null,
+      reanalyze: isReanalysis,
       ...textModelRequestOptions(),
     }),
   });
-  setSelectedPaper(paper);
-  if (paper.analysis_status === "complete") {
+  setSelectedPaper(paper, { preserveWorkspace: isReanalysis });
+  if (paper.reanalysis_status === "analyzing") {
+    hideToast();
+    showToast("Reanalysis started. The current narrative remains available.");
+    pollPaperAnalysis(paper.id);
+  } else if (paper.analysis_status === "complete") {
     await refreshReaderAnnotations(paper);
     hideToast();
-    startFigureAnalysisAfterText(paper.id);
+    if (paperNeedsPolling(paper)) {
+      pollPaperAnalysis(paper.id);
+    }
   } else {
     hideToast();
     showToast("Analysis started. Keep reading while it runs.");
@@ -2886,11 +2965,21 @@ async function startSelectedPaperAnalysis(event) {
   }
 }
 
+function paperNeedsPolling(paper) {
+  if (!paper || paper.analysis_status === "error" || paper.reanalysis_status === "error") {
+    return false;
+  }
+  return paper.analysis_status === "analyzing"
+    || paper.reanalysis_status === "analyzing"
+    || paper.citation_status === "pending"
+    || paper.citation_status === "analyzing";
+}
+
 function pollPaperAnalysis(paperId) {
   if (state.analysisPoll) {
     window.clearTimeout(state.analysisPoll);
   }
-  if (!state.selectedPaper || state.selectedPaper.id !== paperId || state.selectedPaper.analysis_status !== "analyzing") {
+  if (!state.selectedPaper || state.selectedPaper.id !== paperId || !paperNeedsPolling(state.selectedPaper)) {
     state.analysisPoll = null;
     return;
   }
@@ -2901,21 +2990,34 @@ function pollPaperAnalysis(paperId) {
       if (!state.selectedPaper || state.selectedPaper.id !== paperId) {
         return;
       }
+      const previousRevision = state.selectedPaper.analysis_revision || 0;
       state.selectedPaper = paper;
+      if ((paper.analysis_revision || 0) > previousRevision) {
+        resetChat();
+        state.activeHighlightFacet = "all";
+      } else {
+        syncSelectedFigures();
+      }
       upsertPaperSummary(paper);
       renderPaperList();
       renderPaperDetails(paper);
+      renderChatFigureFocus();
       syncPaperActions();
-      if (paper.analysis_status === "analyzing") {
-        pollPaperAnalysis(paperId);
+      if (paper.reanalysis_status === "error") {
+        hideToast();
+        showToast(paper.reanalysis_error || "Reanalysis failed");
+      } else if (paper.analysis_status === "error") {
+        hideToast();
+        showToast(paper.analysis_error || "Analysis failed");
       } else if (paper.analysis_status === "complete") {
         await refreshReaderAnnotations(paper);
         renderPaperDetails(paper);
         hideToast();
-        startFigureAnalysisAfterText(paperId);
-      } else if (paper.analysis_status === "error") {
-        hideToast();
-        showToast(paper.analysis_error || "Analysis failed");
+        if (paperNeedsPolling(paper)) {
+          pollPaperAnalysis(paperId);
+        }
+      } else if (paperNeedsPolling(paper)) {
+        pollPaperAnalysis(paperId);
       }
     } catch (error) {
       showToast(error.message || String(error));
@@ -2923,16 +3025,7 @@ function pollPaperAnalysis(paperId) {
   }, 2500);
 }
 
-function startFigureAnalysisAfterText(paperId) {
-  if (!state.selectedPaper || state.selectedPaper.id !== paperId) {
-    return;
-  }
-  showToast("Text analysis ready. Analyzing figures and tables.", true);
-  analyzeFiguresInReader(false).catch((error) => {
-    hideToast();
-    showToast(error.message || String(error));
-  });
-}
+
 
 function renderChat() {
   if (!els.chatMessages) {
@@ -2940,7 +3033,7 @@ function renderChat() {
   }
 
   if (!state.chatMessages.length) {
-    setHtml(els.chatMessages, `<div class="muted-box">Ask a question about this paper.</div>`);
+    setHtml(els.chatMessages, "");
     return;
   }
 
@@ -3523,8 +3616,11 @@ function copyActiveSelection(event = null) {
 }
 
 function renderHighlightPopover(highlight) {
-  const explanation = briefText(highlight?.comment || highlight?.reason || highlight?.snippet || "");
+  const explanation = String(highlight?.text || highlight?.snippet || "").trim();
   const page = highlight?.page_number ? `p. ${highlight.page_number}` : "unplaced";
+  const figure = highlight?.source?.type === "figure"
+    ? (state.selectedPaper?.figures || []).find((item) => item.id === highlight.source.visual_id)
+    : null;
   setHtml(
     els.highlightPopover,
     `
@@ -3537,8 +3633,10 @@ function renderHighlightPopover(highlight) {
         <p>${escapeHtml(explanation || "No explanation available yet.")}</p>
       </div>
       <div class="popover-actions">
-        <button data-explain-highlight type="button">Explain in chat</button>
-        <button data-remove-highlight type="button">Remove</button>
+        ${figure
+          ? '<button data-add-highlight-figure type="button">Add figure to chat</button>'
+          : '<button data-explain-highlight type="button">Explain in chat</button>'}
+        ${highlight?.origin === "manual" ? '<button data-remove-highlight type="button">Remove</button>' : ''}
       </div>
     `,
   );
@@ -3549,7 +3647,7 @@ function showHighlightPopover(highlightIndex, rect) {
     return;
   }
 
-  const highlight = (state.selectedPaper.highlights || [])[highlightIndex];
+  const highlight = (state.selectedPaper.overlay_highlights || state.selectedPaper.highlights || [])[highlightIndex];
   if (!highlight) {
     hideHighlightPopover();
     return;
@@ -3600,7 +3698,7 @@ function renderFigurePopover(figure) {
         ${figureTextBlock("Big picture", figure?.why_it_matters)}
         ${figureTextBlock("What it shows / results", figure?.explanation)}
       </div>
-      <button data-add-active-figure type="button">Add to chat</button>
+      <button data-add-active-figure type="button">Add figure to chat</button>
     `,
   );
 }
@@ -3752,7 +3850,7 @@ function selectedPaperWithFigurePayload(payload) {
   };
 }
 
-async function saveHighlights(highlights, message) {
+async function saveHighlights(manualHighlights, message) {
   if (!state.selectedPaper) {
     return;
   }
@@ -3760,7 +3858,7 @@ async function saveHighlights(highlights, message) {
   const paper = await requestJson(`/api/papers/${state.selectedPaper.id}/highlights`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ highlights }),
+    body: JSON.stringify({ manual_highlights: manualHighlights }),
   });
   applySelectedPaperUpdate(paper);
   await renderPdfPreservingScroll(paper);
@@ -3818,7 +3916,7 @@ async function addActiveSelectionHighlight() {
     highlight.color = category.color;
   }
 
-  const highlights = [...(state.selectedPaper.highlights || []), highlight];
+  const highlights = [...(state.selectedPaper.manual_highlights || []), highlight];
   hideSelectionPopover();
   window.getSelection()?.removeAllRanges();
   await saveHighlights(highlights, "Highlight added");
@@ -3830,10 +3928,17 @@ async function removeActiveHighlight() {
     return;
   }
 
-  const highlights = (state.selectedPaper.highlights || [])
-    .filter((_, index) => index !== state.activeHighlightIndex);
+  const highlight = (state.selectedPaper.overlay_highlights || state.selectedPaper.highlights || [])[state.activeHighlightIndex];
+  if (!highlight?.id) {
+    hideHighlightPopover();
+    return;
+  }
   hideHighlightPopover();
-  await saveHighlights(highlights, "Highlight removed");
+  const source = highlight.origin === "manual" ? "manual" : "generated";
+  const paper = await requestJson(`/api/papers/${state.selectedPaper.id}/highlights/${encodeURIComponent(highlight.id)}?source=${source}`, { method: "DELETE" });
+  applySelectedPaperUpdate(paper);
+  await renderPdfPreservingScroll(paper);
+  showToast("Highlight removed");
 }
 
 async function explainSelection(selection, beforeRequest) {
@@ -3886,23 +3991,37 @@ async function explainActiveHighlight() {
     return;
   }
 
-  const highlight = (state.selectedPaper.highlights || [])[state.activeHighlightIndex];
-  if (!highlight?.snippet) {
+  const highlight = (state.selectedPaper.overlay_highlights || state.selectedPaper.highlights || [])[state.activeHighlightIndex];
+  const text = highlight?.text || highlight?.snippet || "";
+  if (!text) {
     hideHighlightPopover();
     return;
   }
 
   await explainSelection(
     {
-      text: highlight.snippet,
+      text,
       pageNumber: highlight.page_number || null,
-      pageText: state.pageTexts.get(highlight.page_number) || highlight.reason || "",
+      pageText: state.pageTexts.get(highlight.page_number) || "",
     },
     hideHighlightPopover,
   );
 }
 
-async function sendChatMessage(content, forceWeb = false, citationContext = null, options = {}) {
+function resetChat() {
+  state.chatMessages = [];
+  state.pendingCitationContext = null;
+  state.selectedFigures = [];
+  if (els.chatInput) {
+    els.chatInput.value = "";
+    resizeChatInput();
+    els.chatInput.focus();
+  }
+  renderChat();
+  renderChatFigureFocus();
+}
+
+async function sendChatMessage(content, forceWeb = false, citationContext = null) {
   if (!state.selectedPaper) {
     showToast("Select a paper first");
     return;
@@ -3919,9 +4038,6 @@ async function sendChatMessage(content, forceWeb = false, citationContext = null
     return;
   }
 
-  if (options.resetHistory) {
-    state.chatMessages = [];
-  }
   state.chatMessages.push({ role: "user", content });
   renderChat();
   if (els.chatInput) {
@@ -3957,124 +4073,7 @@ async function sendChatMessage(content, forceWeb = false, citationContext = null
   renderChat();
 }
 
-async function analyzeFiguresInReader(force = false) {
-  if (!state.selectedPaper) {
-    showToast("Select a paper first");
-    return;
-  }
-  if (!requireOpenAiKey()) {
-    return;
-  }
 
-  const paperId = state.selectedPaper.id;
-  state.figureAnalysisRunning = true;
-  syncPaperActions();
-  showToast("Analyzing figures and tables", true);
-
-  let payload;
-  try {
-    payload = await requestJson(`/api/papers/${paperId}/figures/analyze`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        provider: selectedProvider(),
-        api_key: requestApiKey() || null,
-        force,
-        background: true,
-        ...visionModelRequestOptions(),
-      }),
-    });
-  } catch (error) {
-    state.figureAnalysisRunning = false;
-    syncPaperActions();
-    throw error;
-  }
-  if (!state.selectedPaper || state.selectedPaper.id !== paperId) {
-    hideToast();
-    return;
-  }
-
-  const paper = selectedPaperWithFigurePayload(payload);
-  applySelectedPaperUpdate(paper);
-  syncSelectedFigures();
-  renderChatFigureFocus();
-  await refreshFigureAnnotations(paper);
-  if (payload.status === "running") {
-    pollFigureAnalysis(paperId);
-    return;
-  }
-
-  hideToast();
-  showToast(
-    paper.figures.length
-      ? `${paper.figures.length} figure/table annotation${paper.figures.length === 1 ? "" : "s"} ready`
-      : "No figures or tables found",
-  );
-  state.figureAnalysisRunning = false;
-  syncPaperActions();
-}
-
-function pollFigureAnalysis(paperId) {
-  if (state.figurePoll) {
-    window.clearTimeout(state.figurePoll);
-  }
-  if (!state.selectedPaper || state.selectedPaper.id !== paperId) {
-    state.figureAnalysisRunning = false;
-    syncPaperActions();
-    state.figurePoll = null;
-    return;
-  }
-
-  state.figureAnalysisRunning = true;
-  syncPaperActions();
-  state.figurePoll = window.setTimeout(async () => {
-    try {
-      const payload = await requestJson(`/api/papers/${paperId}/figures`);
-      if (!state.selectedPaper || state.selectedPaper.id !== paperId) {
-        return;
-      }
-
-      const previousFigureCount = state.selectedPaper.figures?.length || 0;
-      const paper = selectedPaperWithFigurePayload(payload);
-      applySelectedPaperUpdate(paper);
-      syncSelectedFigures();
-      renderChatFigureFocus();
-      if ((paper.figures?.length || 0) !== previousFigureCount) {
-        await refreshFigureAnnotations(paper);
-      }
-
-      if (payload.status === "running") {
-        showToast(
-          `Analyzing figures and tables ${payload.completed_pages || 0}/${payload.total_pages || "?"}`,
-          true,
-        );
-        pollFigureAnalysis(paperId);
-        return;
-      }
-
-      state.figureAnalysisRunning = false;
-      state.figurePoll = null;
-      syncPaperActions();
-      hideToast();
-      if (payload.status === "error") {
-        showToast(payload.error || "Figure analysis failed");
-      } else {
-        const count = paper.figures?.length || 0;
-        showToast(
-          count
-            ? `${count} figure/table annotation${count === 1 ? "" : "s"} ready`
-            : "No figures or tables found",
-        );
-      }
-    } catch (error) {
-      state.figureAnalysisRunning = false;
-      state.figurePoll = null;
-      syncPaperActions();
-      hideToast();
-      showToast(error.message || String(error));
-    }
-  }, 1200);
-}
 
 els.uploadForm?.addEventListener("submit", (event) => {
   startSelectedPaperAnalysis(event).catch((error) => {
@@ -4082,6 +4081,9 @@ els.uploadForm?.addEventListener("submit", (event) => {
     showToast(error.message || String(error));
   });
 });
+
+els.previousHighlightButton?.addEventListener("click", () => stepHighlight(-1));
+els.nextHighlightButton?.addEventListener("click", () => stepHighlight(1));
 
 els.pdfInput?.addEventListener("change", () => {
   loadSelectedPaper().catch((error) => {
@@ -4217,6 +4219,13 @@ els.highlightPopover?.addEventListener("click", (event) => {
     hideHighlightPopover();
     return;
   }
+  if (event.target.closest?.("[data-add-highlight-figure]")) {
+    const highlight = (state.selectedPaper?.overlay_highlights || state.selectedPaper?.highlights || [])[state.activeHighlightIndex];
+    const figure = (state.selectedPaper?.figures || []).find((item) => item.id === highlight?.source?.visual_id);
+    addFigureToChat(figure);
+    hideHighlightPopover();
+    return;
+  }
   if (event.target.closest?.("[data-explain-highlight]")) {
     explainActiveHighlight().catch((error) => {
       state.chatMessages.push({ role: "assistant", content: error.message || String(error) });
@@ -4282,13 +4291,13 @@ els.chatForm?.addEventListener("submit", (event) => {
   if (!content) {
     return;
   }
-  const resetHistory = event.submitter?.dataset?.chatAction === "reset-send";
-  sendChatMessage(content, false, state.pendingCitationContext, { resetHistory }).catch((error) => {
+  sendChatMessage(content, false, state.pendingCitationContext).catch((error) => {
     state.chatMessages.push({ role: "assistant", content: error.message || String(error) });
     renderChat();
   });
 });
 
+els.chatResetButton?.addEventListener("click", resetChat);
 els.chatInput?.addEventListener("input", resizeChatInput);
 els.chatInput?.addEventListener("keydown", submitChatOnEnter);
 syncPanelToggles();

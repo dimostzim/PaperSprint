@@ -14,15 +14,42 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
-from .paper_processing import ExtractedPaper, ground_highlights, normalize_text, score_match
+from .paper_processing import ExtractedPaper, normalize_text, process_narrative_sections, score_match
 
 load_dotenv()
 
-MAX_ANALYSIS_HIGHLIGHTS = 40
-MAX_HIGHLIGHT_SNIPPET_CHARS = 900
+MAX_HIGHLIGHT_SNIPPET_CHARS = 900  # Manual highlights only.
 MAX_TAKEAWAY_EXCERPT_CHARS = 1600
 MAX_CITATION_VALIDATION_CONTEXTS = 180
-ANALYSIS_VERSION = 13
+ANALYSIS_VERSION = 17
+ANALYSIS_RESPONSE_RESERVE_TOKENS = 24_000
+ANALYSIS_SAFETY_MARGIN_TOKENS = 8_000
+DYNAMIC_MODEL_CONTEXT_TOKENS: dict[str, int] = {}
+DYNAMIC_MULTIMODAL_MODELS: set[str] = set()
+DEFAULT_DISCOVERED_CONTEXT_TOKENS = 128_000
+MODEL_MULTIMODAL = {
+    "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark",
+    "gpt-5.2", "gpt-5.2-pro", "gpt-5.1", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini",
+    "o3", "o4-mini", "openai/gpt-5.5", "openai/gpt-5.4", "openai/gpt-5.4-mini",
+    "openai/gpt-5.2", "anthropic/claude-sonnet-4.5", "google/gemini-3-pro",
+}
+MODEL_CONTEXT_TOKENS = {
+    "gpt-5.5": 400_000,
+    "gpt-5.4": 400_000,
+    "gpt-5.4-mini": 400_000,
+    "gpt-5.3-codex": 400_000,
+    "gpt-5.3-codex-spark": 400_000,
+    "gpt-5.2": 400_000,
+    "gpt-5.2-pro": 400_000,
+    "gpt-5.1": 400_000,
+    "gpt-5-mini": 400_000,
+    "gpt-4.1": 1_000_000,
+    "gpt-4.1-mini": 1_000_000,
+    "o3": 200_000,
+    "o4-mini": 200_000,
+    "anthropic/claude-sonnet-4.5": 200_000,
+    "google/gemini-3-pro": 1_000_000,
+}
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "high"
 REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh"}
@@ -90,8 +117,15 @@ def render_prompt(name: str, **values: Any) -> str:
 ANALYSIS_SYSTEM = load_prompt("analysis_system.md")
 CHAT_SYSTEM = load_prompt("chat_system.md")
 CITATION_VALIDATION_SYSTEM = load_prompt("citation_validation_system.md")
-FIGURE_SYSTEM = load_prompt("figure_system.md")
 SELECTION_EXPLANATION_SYSTEM = load_prompt("selection_explanation_system.md")
+
+
+def configured_model_ids() -> list[str]:
+    values = [os.getenv(name, "").strip() for name in ("CODEX_MODEL", "OPENAI_MODEL", "OPENROUTER_MODEL", "PI_MODEL")]
+    models = [value for value in values if value and model_id_is_usable(value)]
+    for model in models:
+        register_catalog_model(model, assume_image_input=True)
+    return list(dict.fromkeys(models))
 
 
 def provider_status() -> dict[str, Any]:
@@ -101,8 +135,16 @@ def provider_status() -> dict[str, Any]:
     default_provider = os.getenv("AI_PROVIDER", "codex")
     if default_provider not in {"auto", "codex", "openai", "openrouter"}:
         default_provider = "codex"
-    codex_model_options = list_codex_models() if has_codex else CODEX_MODEL_OPTIONS
-    model_options = list(dict.fromkeys([*codex_model_options, *OPENAI_MODEL_OPTIONS, *OPENROUTER_MODEL_OPTIONS]))
+    configured_models = configured_model_ids()
+    configured_codex_models = [model.split("/", 1)[-1] for model in configured_models]
+    for model in configured_codex_models:
+        register_catalog_model(model, assume_image_input=True)
+    codex_model_options = list(dict.fromkeys([*(list_codex_models() if has_codex else CODEX_MODEL_OPTIONS), *configured_codex_models]))
+    model_options = [
+        model
+        for model in dict.fromkeys([*codex_model_options, *OPENAI_MODEL_OPTIONS, *OPENROUTER_MODEL_OPTIONS, *configured_models])
+        if model_supports_multimodal(model)
+    ]
     return {
         "default_provider": default_provider,
         "default_text_model": resolve_text_model(None),
@@ -117,11 +159,12 @@ def provider_status() -> dict[str, Any]:
         ),
         "reasoning_efforts": sorted(REASONING_EFFORTS, key=["none", "low", "medium", "high", "xhigh"].index),
         "model_options": model_options,
+        "model_capacities": {model: model_capacity_tokens(model) for model in model_options},
         "provider_model_options": {
             "auto": model_options,
-            "codex": codex_model_options,
-            "openai": OPENAI_MODEL_OPTIONS,
-            "openrouter": OPENROUTER_MODEL_OPTIONS,
+            "codex": [model for model in codex_model_options if model_supports_multimodal(model)],
+            "openai": [model for model in OPENAI_MODEL_OPTIONS if model_supports_multimodal(model)],
+            "openrouter": [model for model in OPENROUTER_MODEL_OPTIONS if model_supports_multimodal(model)],
         },
         "openai_available": has_openai_key,
         "openrouter_available": has_openrouter_key,
@@ -187,6 +230,54 @@ def model_id_is_usable(model_id: str) -> bool:
     return normalized.startswith(("gpt-", "o", "chatgpt-", "computer-use", "openai/", "anthropic/", "google/", "x-ai/", "meta-llama/"))
 
 
+def catalog_input_modalities(item: Any) -> set[str]:
+    if not isinstance(item, dict):
+        return set()
+    architecture = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
+    capabilities = item.get("capabilities") if isinstance(item.get("capabilities"), dict) else {}
+    raw = (
+        architecture.get("input_modalities")
+        or item.get("input_modalities")
+        or item.get("modalities")
+        or capabilities.get("input_modalities")
+        or []
+    )
+    if isinstance(raw, str):
+        raw = [raw]
+    return {str(value).lower() for value in raw if value}
+
+
+def register_catalog_model(model_id: str, item: Any = None, assume_image_input: bool = False) -> None:
+    if not model_id:
+        return
+    metadata = item if isinstance(item, dict) else {}
+    modalities = catalog_input_modalities(metadata)
+    capabilities = metadata.get("capabilities") if isinstance(metadata.get("capabilities"), dict) else {}
+    supports_images = (
+        "image" in modalities
+        or metadata.get("supports_image_input") is True
+        or metadata.get("supports_vision") is True
+        or capabilities.get("vision") is True
+        or capabilities.get("image_input") is True
+        or (assume_image_input and not modalities)
+    )
+    if supports_images:
+        DYNAMIC_MULTIMODAL_MODELS.add(model_id)
+    try:
+        context_length = int(
+            metadata.get("context_window")
+            or metadata.get("context_length")
+            or capabilities.get("context_window")
+            or 0
+        )
+    except (TypeError, ValueError):
+        context_length = 0
+    if context_length > 0:
+        DYNAMIC_MODEL_CONTEXT_TOKENS[model_id] = context_length
+    elif supports_images:
+        DYNAMIC_MODEL_CONTEXT_TOKENS.setdefault(model_id, DEFAULT_DISCOVERED_CONTEXT_TOKENS)
+
+
 def sort_model_ids(model_ids: list[str]) -> list[str]:
     preferred = [
         "gpt-5.5",
@@ -229,6 +320,7 @@ def list_codex_models() -> list[str]:
         model_id = str(item.get("slug", "")).strip()
         if model_id:
             model_ids.append(model_id)
+            register_catalog_model(model_id, item, assume_image_input=True)
     return sort_model_ids(model_ids) or CODEX_MODEL_OPTIONS
 
 
@@ -241,11 +333,14 @@ def list_openai_models(api_key: str | None = None) -> list[str]:
 
     client = OpenAI(api_key=key)
     models = client.models.list()
-    model_ids = [
-        model.id
-        for model in models.data
-        if model_id_is_usable(str(model.id))
-    ]
+    model_ids = []
+    for model in models.data:
+        model_id = str(model.id)
+        if not model_id_is_usable(model_id):
+            continue
+        model_ids.append(model_id)
+        metadata = model.model_dump() if hasattr(model, "model_dump") else vars(model)
+        register_catalog_model(model_id, metadata, assume_image_input=True)
     return sort_model_ids(model_ids) or OPENAI_MODEL_OPTIONS
 
 
@@ -268,6 +363,7 @@ def list_openrouter_models(api_key: str | None = None) -> list[str]:
         outputs_text = not output_modalities or "text" in output_modalities
         if model_id and supports_text and outputs_text:
             model_ids.append(model_id)
+            register_catalog_model(model_id, item)
     return sort_model_ids(model_ids) or OPENROUTER_MODEL_OPTIONS
 
 
@@ -308,9 +404,76 @@ def choose_provider(requested: str | None, api_key: str | None = None) -> str:
     return provider
 
 
-def build_analysis_prompt(extracted: ExtractedPaper) -> str:
-    text = format_guided_reading_text(extracted)[:70000]
-    return render_prompt("analysis_user.md", title=extracted.title, text=text)
+class ModelCapacityError(ValueError):
+    def __init__(self, model: str, required_tokens: int, capacity_tokens: int | None):
+        self.model = model
+        self.required_tokens = required_tokens
+        self.capacity_tokens = capacity_tokens
+        capacity = f"{capacity_tokens:,} tokens" if capacity_tokens else "unknown"
+        super().__init__(
+            f"The complete paper requires about {required_tokens:,} input tokens, but {model} has {capacity} capacity. "
+            "Choose a larger-context model and analyze again."
+        )
+
+
+def model_capacity_tokens(model: str | None) -> int | None:
+    selected = resolve_text_model(model)
+    overrides = os.getenv("MODEL_CONTEXT_TOKENS", "").strip()
+    if overrides:
+        try:
+            value = json.loads(overrides)
+            if isinstance(value, dict) and int(value.get(selected, 0)) > 0:
+                return int(value[selected])
+        except (ValueError, TypeError, json.JSONDecodeError):
+            pass
+    unqualified = selected.split("/", 1)[-1]
+    return DYNAMIC_MODEL_CONTEXT_TOKENS.get(selected) or MODEL_CONTEXT_TOKENS.get(selected) or MODEL_CONTEXT_TOKENS.get(unqualified)
+
+
+def estimate_tokens(value: str) -> int:
+    # Conservative tokenizer-independent estimate suitable for preflight.
+    return (len(value.encode("utf-8")) + 2) // 3
+
+
+def estimate_image_tokens(image_paths: list[Path] | None) -> int:
+    """Conservative tile estimate; unreadable dimensions make capacity unknowable."""
+    import fitz
+
+    total = 0
+    for path in image_paths or []:
+        try:
+            pixmap = fitz.Pixmap(path)
+            tiles = ((pixmap.width + 511) // 512) * ((pixmap.height + 511) // 512)
+        except Exception as error:
+            raise ModelCapacityError(path.name, 0, None) from error
+        total += 512 + tiles * 512
+    return total
+
+
+def analysis_required_tokens(prompt: str, image_paths: list[Path] | None = None) -> int:
+    return estimate_tokens(f"{ANALYSIS_SYSTEM}\n\n{prompt}") + estimate_image_tokens(image_paths) + ANALYSIS_RESPONSE_RESERVE_TOKENS + ANALYSIS_SAFETY_MARGIN_TOKENS
+
+
+def model_supports_multimodal(model: str | None) -> bool:
+    selected = resolve_text_model(model)
+    return selected in DYNAMIC_MULTIMODAL_MODELS or selected in MODEL_MULTIMODAL or selected.split("/", 1)[-1] in MODEL_MULTIMODAL
+
+
+def validate_analysis_capacity(prompt: str, model: str | None, image_paths: list[Path] | None = None) -> dict[str, int | str]:
+    selected = resolve_text_model(model)
+    required = analysis_required_tokens(prompt, image_paths)
+    capacity = model_capacity_tokens(selected)
+    if not model_supports_multimodal(selected):
+        raise ModelCapacityError(selected, required, capacity)
+    if capacity is None or required > capacity:
+        raise ModelCapacityError(selected, required, capacity)
+    return {"model": selected, "required_tokens": required, "capacity_tokens": capacity}
+
+
+def build_analysis_prompt(extracted: ExtractedPaper, visuals: list[dict[str, Any]] | None = None) -> str:
+    text = format_guided_reading_text(extracted)
+    visual_manifest = json.dumps([{key: item.get(key) for key in ("id", "page_number", "nearby_text")} for item in visuals or []], ensure_ascii=False)
+    return render_prompt("analysis_user.md", title=extracted.title, visual_manifest=visual_manifest, text=text)
 
 
 def format_analysis_text(extracted: ExtractedPaper) -> str:
@@ -328,7 +491,8 @@ def format_analysis_text(extracted: ExtractedPaper) -> str:
 
 def format_guided_reading_text(extracted: ExtractedPaper) -> str:
     if not extracted.pages:
-        return sanitize_prompt_text(extracted.full_text)
+        text, _ = without_reference_section(sanitize_prompt_text(extracted.full_text))
+        return normalize_text(text)
 
     parts = []
     for page in extracted.pages:
@@ -372,47 +536,24 @@ def run_openai(
     api_key: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    image_paths: list[Path] | None = None,
 ) -> str:
     from openai import OpenAI
 
     client = OpenAI(api_key=openai_api_key(api_key))
+    user_content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+    for image_path in image_paths or []:
+        user_content.append({"type": "input_text", "text": f"Visual image {image_path.stem}:"})
+        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        user_content.append({"type": "input_image", "image_url": f"data:image/jpeg;base64,{encoded}"})
     response = client.responses.create(
         model=resolve_text_model(model),
         input=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": user_content},
         ],
         reasoning={"effort": resolve_reasoning_effort(reasoning_effort, "OPENAI_REASONING_EFFORT")},
         temperature=0.2,
-    )
-    return response.output_text
-
-
-def run_openai_vision(
-    prompt: str,
-    image_path: Path,
-    api_key: str | None = None,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
-) -> str:
-    from openai import OpenAI
-
-    client = OpenAI(api_key=openai_api_key(api_key))
-    image_data = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    response = client.responses.create(
-        model=resolve_vision_model(model),
-        input=[
-            {"role": "system", "content": FIGURE_SYSTEM},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt},
-                    {"type": "input_image", "image_url": f"data:image/jpeg;base64,{image_data}"},
-                ],
-            },
-        ],
-        reasoning={"effort": resolve_reasoning_effort(reasoning_effort, "OPENAI_VISION_REASONING_EFFORT", "OPENAI_REASONING_EFFORT")},
-        temperature=0.1,
     )
     return response.output_text
 
@@ -454,12 +595,18 @@ def run_openrouter(
     api_key: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    image_paths: list[Path] | None = None,
 ) -> str:
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for image_path in image_paths or []:
+        user_content.append({"type": "text", "text": f"Visual image {image_path.stem}:"})
+        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
     body: dict[str, Any] = {
         "model": model or os.getenv("OPENROUTER_MODEL") or "openai/gpt-5.5",
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": user_content},
         ],
         "temperature": 0.2,
     }
@@ -479,57 +626,27 @@ def run_openrouter(
     return openrouter_response_text(response.json())
 
 
-def run_openrouter_vision(
-    prompt: str,
-    image_path: Path,
-    api_key: str | None = None,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
-) -> str:
-    image_data = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    body: dict[str, Any] = {
-        "model": model or os.getenv("OPENROUTER_VISION_MODEL") or os.getenv("OPENROUTER_MODEL") or "openai/gpt-5.5",
-        "messages": [
-            {"role": "system", "content": FIGURE_SYSTEM},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}},
-                ],
-            },
-        ],
-        "temperature": 0.1,
-        "response_format": {"type": "json_object"},
-    }
-    reasoning = openrouter_reasoning(reasoning_effort)
-    if reasoning:
-        body["reasoning"] = reasoning
+def codex_supports_image_attachments(codex_path: str) -> bool:
+    try:
+        result = subprocess.run(
+            [codex_path, "exec", "--help"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "--image" in result.stdout
 
-    response = requests.post(
-        f"{OPENROUTER_BASE_URL}/chat/completions",
-        headers=openrouter_headers(api_key),
-        json=body,
-        timeout=int(os.getenv("OPENROUTER_FIGURE_TIMEOUT_SECONDS", os.getenv("OPENROUTER_TIMEOUT_SECONDS", "180"))),
+
+def codex_direct_visual_prompt(prompt: str, image_paths: list[Path]) -> str:
+    visual_paths = "\n".join(f"- {path.resolve()}" for path in image_paths)
+    return (
+        f"{prompt}\n\nOpen and inspect every visual file below directly using your local image-reading tools. "
+        "These files are actual visual evidence; prior text descriptions are not substitutes:\n"
+        f"{visual_paths}"
     )
-    response.raise_for_status()
-    return openrouter_response_text(response.json())
-
-
-def run_codex_vision(
-    prompt: str,
-    image_path: Path,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
-) -> str:
-    image_prompt = render_prompt(
-        "codex_vision_user.md",
-        figure_system=FIGURE_SYSTEM,
-        prompt=prompt,
-        image_path=image_path.resolve(),
-    )
-    timeout = int(os.getenv("CODEX_FIGURE_TIMEOUT_SECONDS", os.getenv("CODEX_TIMEOUT_SECONDS", "180")))
-    return run_codex(image_prompt, timeout, resolve_vision_model(model), reasoning_effort)
 
 
 def run_codex(
@@ -537,12 +654,16 @@ def run_codex(
     timeout_seconds: int | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    image_paths: list[Path] | None = None,
 ) -> str:
     codex_path = shutil.which("codex")
     if not codex_path:
         raise RuntimeError("Codex CLI is not installed or not on PATH.")
 
     prompt = sanitize_prompt_text(prompt)
+    attach_images = bool(image_paths) and codex_supports_image_attachments(codex_path)
+    if image_paths and not attach_images:
+        prompt = codex_direct_visual_prompt(prompt, image_paths)
     timeout = timeout_seconds or int(os.getenv("CODEX_TIMEOUT_SECONDS", "180"))
     selected_model = resolve_text_model(model)
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -566,6 +687,8 @@ def run_codex(
         ]
         if selected_model:
             args[5:5] = ["-m", selected_model]
+        if attach_images:
+            args[-1:-1] = [f"--image={','.join(str(path.resolve()) for path in image_paths or [])}"]
 
         try:
             result = subprocess.run(
@@ -587,6 +710,13 @@ def run_codex(
                 return output
         if result.returncode != 0:
             message = (result.stderr or result.stdout or "Codex failed.").strip()
+            if attach_images and image_paths and "No prompt provided via stdin" in message:
+                return run_codex(
+                    codex_direct_visual_prompt(prompt, image_paths),
+                    timeout_seconds=timeout_seconds,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
             raise RuntimeError(message[:1200])
         return result.stdout.strip()
 
@@ -600,65 +730,34 @@ def run_ai(
     model: str | None = None,
     reasoning_effort: str | None = None,
     timeout_seconds: int | None = None,
+    image_paths: list[Path] | None = None,
 ) -> tuple[str, str]:
     selected = choose_provider(provider, api_key)
     if selected == "openai":
         if not openai_api_key(api_key):
             raise RuntimeError("OPENAI_API_KEY is not set.")
-        return run_openai(prompt, system_prompt, expect_json, api_key, model, reasoning_effort), "openai"
+        return run_openai(prompt, system_prompt, expect_json, api_key, model, reasoning_effort, image_paths), "openai"
     if selected == "openrouter":
         if not openrouter_api_key(api_key):
             raise RuntimeError("OPENROUTER_API_KEY is not set.")
-        return run_openrouter(prompt, system_prompt, expect_json, api_key, model, reasoning_effort), "openrouter"
+        return run_openrouter(prompt, system_prompt, expect_json, api_key, model, reasoning_effort, image_paths), "openrouter"
     if selected == "codex":
+        codex_prompt = f"{system_prompt}\n\n{prompt}"
+        if image_paths:
+            codex_prompt += "\n\nThe attached images are actual visual evidence. Inspect their pixels directly before answering visual questions."
         return run_codex(
-            f"{system_prompt}\n\n{prompt}",
+            codex_prompt,
             timeout_seconds=timeout_seconds,
             model=model,
             reasoning_effort=reasoning_effort,
+            image_paths=image_paths,
         ), "codex"
     raise RuntimeError(f"Unknown AI provider: {provider}")
 
 
-def choose_vision_provider(requested: str | None, api_key: str | None = None) -> str:
-    provider = (requested or os.getenv("FIGURE_AI_PROVIDER", "auto")).lower()
-    if provider == "auto":
-        if shutil.which("codex"):
-            return "codex"
-        if openai_api_key(api_key):
-            return "openai"
-        if openrouter_api_key():
-            return "openrouter"
-        raise RuntimeError("No vision provider available. Log in to Codex CLI or set OPENAI_API_KEY or OPENROUTER_API_KEY.")
-    if provider == "codex":
-        if not shutil.which("codex"):
-            raise RuntimeError("Codex CLI is not installed or not on PATH.")
-        return "codex"
-    if provider == "openai":
-        if not openai_api_key(api_key):
-            raise RuntimeError("OPENAI_API_KEY is not set.")
-        return "openai"
-    if provider == "openrouter":
-        if not openrouter_api_key(api_key):
-            raise RuntimeError("OPENROUTER_API_KEY is not set.")
-        return "openrouter"
-    if provider == "local":
-        raise RuntimeError("The local fallback provider has been removed.")
-    raise RuntimeError(f"Unknown AI provider: {provider}")
-
-
 def normalize_highlight_snippet(value: str) -> str:
-    snippet = normalize_text(str(value))
-    if len(snippet) <= MAX_HIGHLIGHT_SNIPPET_CHARS:
-        return snippet
-
-    window = snippet[: MAX_HIGHLIGHT_SNIPPET_CHARS + 1]
-    sentence_ends = [window.rfind(marker) for marker in (".", "?", "!")]
-    sentence_end = max(sentence_ends)
-    if sentence_end >= 40:
-        return window[: sentence_end + 1].strip()
-
-    return window.rsplit(" ", 1)[0].rstrip(",;:") or window.strip()
+    """Normalize a generated passage while preserving its complete contiguous text."""
+    return normalize_text(str(value))
 
 
 def normalize_supporting_excerpt(value: str) -> str:
@@ -681,107 +780,84 @@ def normalize_reference_id(value: Any, fallback: str) -> str:
 
 
 def normalize_analysis(payload: dict[str, Any], extracted: ExtractedPaper) -> dict[str, Any]:
-    def list_of_strings(key: str, limit: int) -> list[str]:
-        values = payload.get(key, [])
-        if not isinstance(values, list):
-            return []
-        return [normalize_text(str(value)) for value in values[:limit] if normalize_text(str(value))]
+    raw_sections = payload.get("narrative_sections")
+    if not isinstance(raw_sections, list) or not raw_sections:
+        raise ValueError("Analysis did not return a non-empty Highlight sequence.")
 
-    def list_of_summary_items(key: str, limit: int, valid_ids: set[str]) -> list[str | dict[str, Any]]:
-        values = payload.get(key, [])
-        if not isinstance(values, list):
-            return []
-
-        items: list[str | dict[str, Any]] = []
-        for value in values[:limit]:
-            if isinstance(value, dict):
-                text = normalize_text(str(value.get("text") or value.get("takeaway") or value.get("summary") or ""))
-                supporting_excerpt = normalize_supporting_excerpt(
-                    str(
-                        value.get("supporting_excerpt")
-                        or value.get("evidence_hint")
-                        or value.get("evidence")
-                        or value.get("evidence_snippet")
-                        or ""
-                    )
-                )
-                if text:
-                    item: dict[str, Any] = {"text": text}
-                    if supporting_excerpt:
-                        item["supporting_excerpt"] = supporting_excerpt
-                    raw_highlight_ids = value.get("highlight_ids") or value.get("highlightIds") or []
-                    if isinstance(raw_highlight_ids, str):
-                        raw_highlight_ids = re.split(r"[\s,;]+", raw_highlight_ids)
-                    if isinstance(raw_highlight_ids, list):
-                        highlight_ids = []
-                        for raw_id in raw_highlight_ids:
-                            highlight_id = normalize_reference_id(raw_id, "")
-                            if highlight_id and highlight_id in valid_ids and highlight_id not in highlight_ids:
-                                highlight_ids.append(highlight_id)
-                        if highlight_ids:
-                            item["highlight_ids"] = highlight_ids
-                    items.append(item)
-                continue
-
-            text = normalize_text(str(value))
-            if text:
-                items.append(text)
-        return items
-
-    glossary = payload.get("glossary", [])
-    if not isinstance(glossary, list):
-        glossary = []
-
-    highlights = payload.get("highlights", [])
-    if not isinstance(highlights, list):
+    sections: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    for section_index, section in enumerate(raw_sections, start=1):
+        if not isinstance(section, dict) or not isinstance(section.get("highlights"), list):
+            raise ValueError("Analysis returned a malformed Narrative section.")
+        heading = normalize_text(str(section.get("heading", "")))
+        if not heading:
+            raise ValueError("Every Narrative section requires a heading.")
         highlights = []
+        for item in section["highlights"]:
+            if not isinstance(item, dict):
+                raise ValueError("Analysis returned a malformed Highlight.")
+            text = normalize_text(str(item.get("text", "")))
+            source = item.get("source")
+            if not text or not isinstance(source, dict):
+                raise ValueError("Every Highlight requires synthesized text and one source.")
+            source_type = str(source.get("type", ""))
+            if source_type == "text":
+                anchor = normalize_text(str(source.get("anchor", "")))
+                try:
+                    page_hint = int(source.get("page_hint"))
+                except (TypeError, ValueError):
+                    raise ValueError("Text sources require a copied anchor and page hint.") from None
+                if not anchor or page_hint < 1:
+                    raise ValueError("Text sources require a copied anchor and page hint.")
+                clean_source = {"type": "text", "anchor": anchor, "page_hint": page_hint}
+            elif source_type == "figure":
+                visual_id = normalize_reference_id(source.get("visual_id"), "")
+                if not visual_id:
+                    raise ValueError("Figure sources require a prepared visual id.")
+                clean_source = {"type": "figure", "visual_id": visual_id}
+            else:
+                raise ValueError("Every Highlight source must be text or figure.")
 
-    normalized_highlights = []
-    used_highlight_ids: set[str] = set()
-    for index, item in enumerate(highlights[:MAX_ANALYSIS_HIGHLIGHTS], start=1):
-        if not isinstance(item, dict) or not item.get("snippet"):
-            continue
-
-        fallback_id = f"h{index}"
-        highlight_id = normalize_reference_id(item.get("id"), fallback_id)
-        if highlight_id in used_highlight_ids:
-            highlight_id = fallback_id
-        while highlight_id in used_highlight_ids:
-            highlight_id = f"{fallback_id}-{len(used_highlight_ids) + 1}"
-        used_highlight_ids.add(highlight_id)
-
-        normalized_highlights.append(
-            {
+            fallback_id = f"h{len(used_ids) + 1}"
+            highlight_id = normalize_reference_id(item.get("id"), fallback_id)
+            while highlight_id in used_ids:
+                highlight_id = f"{fallback_id}-{len(used_ids) + 1}"
+            used_ids.add(highlight_id)
+            highlights.append({
                 "id": highlight_id,
+                "text": text,
                 "label": str(item.get("label", "important")),
-                "snippet": normalize_highlight_snippet(str(item.get("snippet", ""))),
-                "reason": normalize_text(str(item.get("reason", "")))[:500],
-                "comment": normalize_text(str(item.get("comment", "")))[:700],
-            }
-        )
-    valid_highlight_ids = {highlight["id"] for highlight in normalized_highlights}
+                "source": clean_source,
+            })
+        if highlights:
+            sections.append({"heading": heading[:160], "highlights": highlights})
+
+    if not sections or not used_ids:
+        raise ValueError("Analysis did not return a non-empty Highlight sequence.")
+
+    raw_figures = payload.get("figures", [])
+    figures = []
+    if isinstance(raw_figures, list):
+        for item in raw_figures:
+            if not isinstance(item, dict):
+                continue
+            visual_id = normalize_reference_id(item.get("id") or item.get("visual_id"), "")
+            if not visual_id:
+                continue
+            figures.append({
+                "id": visual_id,
+                "label": normalize_text(str(item.get("label") or item.get("title") or "Visual"))[:180],
+                "title": normalize_text(str(item.get("title") or item.get("label") or "Visual"))[:180],
+                "type": normalize_text(str(item.get("type") or "figure"))[:40],
+                "explanation": normalize_text(str(item.get("interpretation") or item.get("explanation") or "")),
+                "why_it_matters": normalize_text(str(item.get("why_it_matters") or "")),
+            })
 
     return {
         "title": normalize_text(str(payload.get("title") or extracted.title))[:220],
-        "overview": normalize_text(str(payload.get("overview") or "")),
-        "background_notes": list_of_strings("background_notes", 6),
-        "key_takeaways": list_of_summary_items("key_takeaways", 8, valid_highlight_ids),
-        "not_shown": list_of_strings("not_shown", 4),
-        "code_availability": list_of_strings("code_availability", 3),
-        "reviewer_questions": list_of_strings("reviewer_questions", 6),
-        "read_this_first": list_of_strings("read_this_first", 6),
-        "glossary": [
-            {
-                "term": normalize_text(str(item.get("term", "")))[:120],
-                "definition": normalize_text(str(item.get("definition", "")))[:500],
-            }
-            for item in glossary[:10]
-            if isinstance(item, dict) and item.get("term") and item.get("definition")
-        ],
-        "highlights": normalized_highlights,
-        "questions": list_of_strings("questions", 8),
+        "narrative_sections": sections,
+        "figures": figures,
     }
-
 
 def analyze_paper(
     pdf_path: Path,
@@ -790,10 +866,19 @@ def analyze_paper(
     api_key: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    visuals: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     selected_provider = choose_provider(provider, api_key)
+    prompt = build_analysis_prompt(extracted, visuals)
+    image_paths = list(dict.fromkeys(
+        Path(path)
+        for item in visuals or []
+        for path in (item.get("image_path"), item.get("page_image_path"))
+        if path
+    ))
+    validate_analysis_capacity(prompt, model, image_paths)
     output, provider_used = run_ai(
-        build_analysis_prompt(extracted),
+        prompt,
         ANALYSIS_SYSTEM,
         selected_provider,
         True,
@@ -801,12 +886,34 @@ def analyze_paper(
         model,
         reasoning_effort,
         int(os.getenv("CODEX_ANALYSIS_TIMEOUT_SECONDS", os.getenv("CODEX_TIMEOUT_SECONDS", "600"))),
+        image_paths,
     )
     analysis = normalize_analysis(parse_json_payload(output), extracted)
 
-    analysis["highlights"] = ground_highlights(pdf_path, analysis.get("highlights", []), extracted.sentence_spans)
+    visual_records = []
+    interpretations = {item["id"]: item for item in analysis.get("figures", [])}
+    missing_interpretations = [item["id"] for item in visuals or [] if item["id"] not in interpretations]
+    if missing_interpretations:
+        raise ValueError("Analysis did not interpret every prepared substantive visual.")
+    for visual in visuals or []:
+        interpretation = interpretations.get(visual["id"], {})
+        visual_records.append({**visual, **interpretation})
+    known_visual_ids = {item["id"] for item in visual_records}
+    for section in analysis["narrative_sections"]:
+        for highlight in section["highlights"]:
+            source = highlight["source"]
+            if source["type"] == "figure" and source["visual_id"] not in known_visual_ids:
+                raise ValueError("A Highlight references an unknown Figure source.")
+    processed = process_narrative_sections(
+        pdf_path,
+        analysis["narrative_sections"],
+        format_guided_reading_text(extracted),
+        visual_records,
+    )
+    analysis["narrative_sections"] = processed["narrative_sections"]
+    analysis["figures"] = visual_records
+    analysis["analysis_text"] = format_guided_reading_text(extracted)
     analysis["provider_used"] = provider_used
-    analysis["warnings"] = analysis.get("warnings", [])
     return analysis
 
 
@@ -891,34 +998,6 @@ def validate_citations(
     return validated
 
 
-def build_figure_prompt(page_number: int, page_text: str) -> str:
-    return render_prompt("figure_user.md", page_number=page_number, page_text=page_text[:5000])
-
-
-def analyze_page_figures(
-    page_number: int,
-    page_text: str,
-    image_path: Path,
-    provider: str | None,
-    api_key: str | None = None,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
-) -> dict[str, Any]:
-    selected_provider = choose_vision_provider(provider, api_key)
-    prompt = build_figure_prompt(page_number, page_text)
-    if selected_provider == "openai":
-        output = run_openai_vision(prompt, image_path, api_key, model, reasoning_effort)
-    elif selected_provider == "codex":
-        output = run_codex_vision(prompt, image_path, model, reasoning_effort)
-    elif selected_provider == "openrouter":
-        output = run_openrouter_vision(prompt, image_path, api_key, model, reasoning_effort)
-    else:
-        raise RuntimeError(f"Unknown vision provider: {provider}")
-    payload = parse_json_payload(output)
-    payload["provider_used"] = selected_provider
-    return payload
-
-
 def select_relevant_excerpts(
     question: str,
     sentence_spans: list[dict[str, Any]],
@@ -955,13 +1034,18 @@ def build_chat_prompt(
         f"- {item['title']} ({item['url']}): {item.get('snippet', '')}" for item in web_results
     )
     citation_text = format_citation_context(citation_context)
-    figure_text = format_figure_context(figure_context)
-    takeaways_text = "\n".join("- " + summary_item_text(item) for item in paper.get("key_takeaways", [])[:8])
+    figure_text = format_figure_context(figure_context or paper.get("figures", []))
+    highlight_narrative = "\n".join(
+        f"## {section.get('heading', 'Narrative')}\n" + "\n".join(
+            f"- {highlight.get('text', '')}" for highlight in section.get("highlights", [])
+        )
+        for section in paper.get("narrative_sections", [])
+    )
     return render_prompt(
         "chat_user.md",
         title=paper.get("title", "Untitled"),
-        overview=paper.get("overview", ""),
-        key_takeaways=takeaways_text,
+        highlight_narrative=highlight_narrative,
+        paper_text=paper.get("analysis_text", ""),
         excerpts=excerpt_text,
         citation_context=citation_text,
         figure_context=figure_text,
@@ -998,7 +1082,7 @@ def format_figure_context(figure_context: list[dict[str, Any]] | None) -> str:
         return "None"
 
     lines = []
-    for index, figure in enumerate(figure_context[:6], start=1):
+    for index, figure in enumerate(figure_context, start=1):
         page_number = figure.get("page_number") or "?"
         title = normalize_text(str(figure.get("title") or figure.get("label") or "Visual"))[:300]
         figure_type = normalize_text(str(figure.get("type", "")))[:80]
@@ -1008,6 +1092,8 @@ def format_figure_context(figure_context: list[dict[str, Any]] | None) -> str:
         uncertainty = normalize_text(str(figure.get("uncertainty", "")))[:400]
 
         parts = [f"Figure {index}: {title}", f"Page: {page_number}"]
+        if figure.get("id"):
+            parts.append(f"Visual image ID: {normalize_text(str(figure['id']))[:120]}")
         if figure_type:
             parts.append(f"Type: {figure_type}")
         if caption:
@@ -1077,13 +1163,23 @@ def answer_chat(
     figure_context: list[dict[str, Any]] | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    figure_image_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
     last_question = next((item["content"] for item in reversed(messages) if item.get("role") == "user"), "")
     excerpts = select_relevant_excerpts(last_question, paper.get("sentences", []))
     selected_provider = choose_provider(provider, api_key)
 
     prompt = build_chat_prompt(paper, messages, excerpts, web_results, citation_context, figure_context)
-    answer, provider_used = run_ai(prompt, CHAT_SYSTEM, selected_provider, False, api_key, model, reasoning_effort)
+    answer, provider_used = run_ai(
+        prompt,
+        CHAT_SYSTEM,
+        selected_provider,
+        False,
+        api_key,
+        model,
+        reasoning_effort,
+        image_paths=figure_image_paths,
+    )
 
     return {
         "answer": answer.strip(),
