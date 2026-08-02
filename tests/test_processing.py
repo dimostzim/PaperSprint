@@ -524,6 +524,56 @@ def test_provider_model_options_uses_codex_catalog(monkeypatch):
     assert provider_model_options("codex") == ["gpt-5.5", "gpt-5.3-codex-spark"]
 
 
+def test_reanalysis_start_preserves_existing_chat_workspace():
+    source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "function setSelectedPaper(paper, { preserveWorkspace = false } = {})" in source
+    assert "setSelectedPaper(paper, { preserveWorkspace: isReanalysis })" in source
+
+
+def test_failed_analysis_does_not_poll_pending_citations_forever():
+    source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    start = source.index("function paperNeedsPolling(paper)")
+    end = source.index("\n\nfunction pollPaperAnalysis", start)
+    function_source = source[start:end]
+    script = f"""
+{function_source}
+console.log(JSON.stringify([
+  paperNeedsPolling({{ analysis_status: "error", citation_status: "pending" }}),
+  paperNeedsPolling({{ analysis_status: "complete", reanalysis_status: "error", citation_status: "pending" }}),
+  paperNeedsPolling({{ analysis_status: "analyzing", citation_status: "pending" }}),
+]));
+"""
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    assert json.loads(result.stdout) == [False, False, True]
+
+
+def test_polling_surfaces_reanalysis_error_before_complete_status():
+    source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    start = source.index("function pollPaperAnalysis(paperId)")
+    end = source.index("\n\n\nfunction renderChat", start)
+    polling_source = source[start:end]
+
+    assert "paper.reanalysis_status === \"error\"" in polling_source
+    assert polling_source.index("paper.reanalysis_status === \"error\"") < polling_source.index("paper.analysis_status === \"complete\"")
+    assert "paper.reanalysis_error || \"Reanalysis failed\"" in polling_source
+
+
+def test_structured_api_errors_use_their_message():
+    source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    start = source.index("function apiErrorMessage(payload, fallback)")
+    end = source.index("\n\nasync function requestJson", start)
+    function_source = source[start:end]
+    script = f"""
+{function_source}
+console.log(apiErrorMessage({{ detail: {{ code: "model_capacity_exceeded", message: "Paper needs 200k tokens." }} }}, "Failed"));
+"""
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    assert result.stdout.strip() == "Paper needs 200k tokens."
+
+
 def test_default_highlight_palette_separates_similar_categories():
     source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
     start = source.index("const DEFAULT_HIGHLIGHT_COLORS = {")

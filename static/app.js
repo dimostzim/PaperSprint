@@ -479,6 +479,24 @@ async function setPdfZoom(nextZoom) {
   syncPdfZoomControls();
 }
 
+function apiErrorMessage(payload, fallback) {
+  const detail = payload?.detail;
+  if (typeof detail === "string" && detail.trim()) {
+    return detail;
+  }
+  if (detail && typeof detail === "object") {
+    if (typeof detail.message === "string" && detail.message.trim()) {
+      return detail.message;
+    }
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
 async function requestJson(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
@@ -491,7 +509,7 @@ async function requestJson(url, options = {}) {
     }
   }
   if (!response.ok) {
-    throw new Error(payload.detail || response.statusText);
+    throw new Error(apiErrorMessage(payload, response.statusText));
   }
   return payload;
 }
@@ -918,14 +936,18 @@ async function removePaper(paperId) {
   showToast("Paper removed");
 }
 
-function setSelectedPaper(paper) {
+function setSelectedPaper(paper, { preserveWorkspace = false } = {}) {
   state.selectedPaper = paper;
-  state.chatMessages = [];
-  state.pendingCitationContext = null;
-  state.selectedFigures = [];
-  state.activeFigure = null;
-  state.activeHighlightIndex = null;
-  state.activeHighlightFacet = "all";
+  if (preserveWorkspace) {
+    syncSelectedFigures();
+  } else {
+    state.chatMessages = [];
+    state.pendingCitationContext = null;
+    state.selectedFigures = [];
+    state.activeFigure = null;
+    state.activeHighlightIndex = null;
+    state.activeHighlightFacet = "all";
+  }
   upsertPaperSummary(paper);
   syncPaperActions();
   renderPaperList();
@@ -1012,15 +1034,18 @@ function showReaderLoading() {
 function renderPaperDetails(paper) {
   state.summaryEvidenceTargets = [];
   const chatAvailable = Boolean(paper.chat_available);
+  const reanalysisFailed = paper.reanalysis_status === "error";
   if (els.chatStatus) {
-    els.chatStatus.textContent = chatAvailable
-      ? ""
-      : paper.analysis_status === "analyzing"
+    els.chatStatus.textContent = reanalysisFailed
+      ? `Reanalysis failed: ${paper.reanalysis_error || "Unknown provider error."} The current analysis remains available.`
+      : chatAvailable
+        ? ""
+        : paper.analysis_status === "analyzing"
         ? paper.analysis_stage || "Analysis in progress."
         : paper.analysis_status === "error"
           ? `Analysis failed: ${paper.analysis_error || "Unknown provider error."} Reanalyze to start chatting.`
           : "Analyze this paper to start chatting.";
-    els.chatStatus.classList.toggle("hidden", chatAvailable);
+    els.chatStatus.classList.toggle("hidden", chatAvailable && !reanalysisFailed);
   }
   if (els.chatInput) els.chatInput.disabled = !chatAvailable;
   els.chatForm?.querySelectorAll("button").forEach((button) => { button.disabled = !chatAvailable; });
@@ -2871,7 +2896,7 @@ async function startSelectedPaperAnalysis(event) {
       ...textModelRequestOptions(),
     }),
   });
-  setSelectedPaper(paper);
+  setSelectedPaper(paper, { preserveWorkspace: isReanalysis });
   if (paper.reanalysis_status === "analyzing") {
     hideToast();
     showToast("Reanalysis started. The current narrative remains available.");
@@ -2890,10 +2915,13 @@ async function startSelectedPaperAnalysis(event) {
 }
 
 function paperNeedsPolling(paper) {
-  return paper?.analysis_status === "analyzing"
-    || paper?.reanalysis_status === "analyzing"
-    || paper?.citation_status === "pending"
-    || paper?.citation_status === "analyzing";
+  if (!paper || paper.analysis_status === "error" || paper.reanalysis_status === "error") {
+    return false;
+  }
+  return paper.analysis_status === "analyzing"
+    || paper.reanalysis_status === "analyzing"
+    || paper.citation_status === "pending"
+    || paper.citation_status === "analyzing";
 }
 
 function pollPaperAnalysis(paperId) {
@@ -2914,14 +2942,23 @@ function pollPaperAnalysis(paperId) {
       const previousRevision = state.selectedPaper.analysis_revision || 0;
       state.selectedPaper = paper;
       if ((paper.analysis_revision || 0) > previousRevision) {
-        state.chatMessages = [];
+        resetChat();
         state.activeHighlightFacet = "all";
+      } else {
+        syncSelectedFigures();
       }
       upsertPaperSummary(paper);
       renderPaperList();
       renderPaperDetails(paper);
+      renderChatFigureFocus();
       syncPaperActions();
-      if (paper.analysis_status === "complete") {
+      if (paper.reanalysis_status === "error") {
+        hideToast();
+        showToast(paper.reanalysis_error || "Reanalysis failed");
+      } else if (paper.analysis_status === "error") {
+        hideToast();
+        showToast(paper.analysis_error || "Analysis failed");
+      } else if (paper.analysis_status === "complete") {
         await refreshReaderAnnotations(paper);
         renderPaperDetails(paper);
         hideToast();
@@ -2930,9 +2967,6 @@ function pollPaperAnalysis(paperId) {
         }
       } else if (paperNeedsPolling(paper)) {
         pollPaperAnalysis(paperId);
-      } else if (paper.analysis_status === "error") {
-        hideToast();
-        showToast(paper.analysis_error || "Analysis failed");
       }
     } catch (error) {
       showToast(error.message || String(error));
