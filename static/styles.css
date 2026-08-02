@@ -1194,6 +1194,11 @@ h2 {
   outline-color: var(--accent-strong);
 }
 
+.chat-page-reference-rect {
+  background: rgba(255, 211, 109, 0.18);
+  outline: 2px solid var(--amber);
+}
+
 @keyframes takeaway-flash {
   0% {
     background: rgba(255, 211, 109, 0.42);
@@ -1801,6 +1806,27 @@ h2 {
 .chat-markdown a {
   color: var(--accent-text);
   word-break: break-word;
+}
+
+.chat-page-reference {
+  display: inline;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent-text);
+  padding: 0 2px;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  word-break: normal;
+}
+
+.chat-page-reference:hover,
+.chat-page-reference:focus-visible {
+  background: var(--accent-soft);
+  outline: 1px solid var(--citation-outline);
 }
 
 .chat-form {

@@ -1,6 +1,7 @@
 import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
 import DOMPurify from "https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.es.mjs";
 import { marked } from "https://cdn.jsdelivr.net/npm/marked@15.0.12/lib/marked.esm.js";
+import { linkifyChatPageReferences } from "./chat_references.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
@@ -2461,6 +2462,56 @@ function jumpToPage(pageNumber) {
   }
 }
 
+function pageReferenceSelection(pageNumber) {
+  const pageSize = pageSizeFor(pageNumber);
+  if (pageSize?.width && pageSize?.height) {
+    const marginX = Math.max(8, pageSize.width * 0.025);
+    const marginY = Math.max(8, pageSize.height * 0.025);
+    return {
+      pageNumber,
+      rects: [[
+        marginX,
+        marginY,
+        Math.max(marginX + 4, pageSize.width - marginX),
+        Math.max(marginY + 4, pageSize.height - marginY),
+      ]],
+    };
+  }
+
+  const page = els.pdfViewer?.querySelector(`[data-page-number="${pageNumber}"]`);
+  if (!page) {
+    return { pageNumber };
+  }
+
+  const inset = 10;
+  return {
+    pageNumber,
+    previewRects: [[
+      inset,
+      inset,
+      Math.max(inset + 4, page.clientWidth - inset),
+      Math.max(inset + 4, page.clientHeight - inset),
+    ]],
+  };
+}
+
+function jumpToChatPageReference(pageNumber) {
+  if (!pageNumber) {
+    return;
+  }
+  const page = els.pdfViewer?.querySelector(`[data-page-number="${pageNumber}"]`);
+  if (!page) {
+    return;
+  }
+
+  jumpToPage(pageNumber);
+  showSelectionPreview(pageReferenceSelection(pageNumber), {
+    className: "chat-page-reference-rect",
+    flash: true,
+    durationMs: 2200,
+  });
+}
+
 function highlightsByPage(highlights) {
   const map = new Map();
   for (const [index, highlight] of (highlights || []).entries()) {
@@ -2998,7 +3049,7 @@ function renderChat() {
 
     const body = document.createElement("div");
     body.className = "chat-markdown";
-    renderChatMarkdown(body, message.content);
+    renderChatMarkdown(body, message.content, { linkPageReferences: role === "assistant" });
 
     article.append(label, body);
     els.chatMessages.appendChild(article);
@@ -3007,7 +3058,7 @@ function renderChat() {
   els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
 }
 
-function renderChatMarkdown(target, value) {
+function renderChatMarkdown(target, value, options = {}) {
   const unsafeHtml = marked.parse(String(value || ""));
   target.innerHTML = DOMPurify.sanitize(unsafeHtml, {
     ALLOWED_TAGS: [
@@ -3046,6 +3097,33 @@ function renderChatMarkdown(target, value) {
     link.target = "_blank";
     link.rel = "noreferrer";
   });
+
+  if (!options.linkPageReferences) {
+    return;
+  }
+  linkifyChatPageReferences(target, { pageCount: currentPageCount() });
+  target.querySelectorAll("[data-chat-page-reference]").forEach((button) => {
+    button.addEventListener("click", () => {
+      jumpToChatPageReference(Number(button.dataset.chatPageReference));
+    });
+  });
+}
+
+function currentPageCount() {
+  const pageNumbers = [];
+  for (const page of state.selectedPaper?.page_sizes || []) {
+    const pageNumber = Number(page.page_number);
+    if (pageNumber) {
+      pageNumbers.push(pageNumber);
+    }
+  }
+  els.pdfViewer?.querySelectorAll(".pdf-page[data-page-number]").forEach((page) => {
+    const pageNumber = Number(page.dataset.pageNumber);
+    if (pageNumber) {
+      pageNumbers.push(pageNumber);
+    }
+  });
+  return pageNumbers.length ? Math.max(...pageNumbers) : 0;
 }
 
 function pageSizeFor(pageNumber) {
@@ -3220,6 +3298,7 @@ function showSelectionPreview(selection, options = {}) {
     return;
   }
 
+  const previewNodes = [];
   for (const rect of selectionPreviewRects(selection, page)) {
     const [x0, y0, x1, y1] = rect;
     const node = document.createElement("div");
@@ -3233,6 +3312,13 @@ function showSelectionPreview(selection, options = {}) {
     node.style.width = `${Math.max(4, x1 - x0)}px`;
     node.style.height = `${Math.max(4, y1 - y0)}px`;
     overlay.appendChild(node);
+    previewNodes.push(node);
+  }
+
+  if (options.durationMs) {
+    window.setTimeout(() => {
+      previewNodes.forEach((node) => node.remove());
+    }, options.durationMs);
   }
 }
 
