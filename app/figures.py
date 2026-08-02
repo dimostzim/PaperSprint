@@ -13,7 +13,7 @@ from .paper_processing import ExtractedPaper, normalize_text
 PAGE_IMAGE_ZOOM = 1.6
 FIGURE_IMAGE_ZOOM = 2.4
 FIGURE_TYPES = {"figure", "table", "plot", "diagram", "screenshot", "equation", "other"}
-VISUAL_PREPARATION_VERSION = 2
+VISUAL_PREPARATION_VERSION = 3
 VISUAL_CUE_RE = re.compile(
     r"\b(?:fig(?:ure)?\.?|tables?|algorithms?|schemes?|diagrams?|plots?)\s*(?:s?\d+|[ivxlcdm]+|[a-z])\b",
     re.IGNORECASE,
@@ -122,8 +122,6 @@ def prepare_visuals(
                     union |= rect
                 if union.width * union.height >= page_area * 0.02:
                     regions.append(union)
-            if not regions and cue:
-                regions = [page.rect]
             if not regions:
                 continue
 

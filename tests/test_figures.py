@@ -56,6 +56,26 @@ def test_prepare_visuals_ignores_page_furniture_drawings_without_visual_cue(tmp_
     assert visuals == []
 
 
+def test_prepare_visuals_does_not_promote_text_page_with_figure_reference_to_full_page_visual(tmp_path):
+    pdf_path = tmp_path / "figure-reference.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_text((50, 100), "The individual differences are summarized in Figure 1 on the next page.")
+    page.insert_text((50, 140), "This page otherwise contains ordinary body text only.")
+    doc.save(pdf_path)
+    doc.close()
+    extracted = ExtractedPaper(
+        "Paper",
+        "",
+        [{"page_number": 1, "text": "The individual differences are summarized in Figure 1 on the next page. This page otherwise contains ordinary body text only."}],
+        [],
+    )
+
+    visuals = prepare_visuals(pdf_path, extracted, tmp_path / "figures", "paper-1")
+
+    assert visuals == []
+
+
 def test_prepare_visuals_keeps_exact_source_box_separate_from_context_crop(tmp_path):
     pdf_path = tmp_path / "algorithm.pdf"
     doc = fitz.open()
