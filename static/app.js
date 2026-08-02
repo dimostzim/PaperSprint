@@ -143,6 +143,7 @@ const els = {
   chatMessages: document.getElementById("chat-messages"),
   chatForm: document.getElementById("chat-form"),
   chatInput: document.getElementById("chat-input"),
+  chatResetButton: document.getElementById("chat-reset-button"),
   webToggle: document.getElementById("web-toggle"),
   selectionPopover: document.getElementById("selection-popover"),
   copySelectionButton: document.getElementById("copy-selection-button"),
@@ -3887,7 +3888,20 @@ async function explainActiveHighlight() {
   );
 }
 
-async function sendChatMessage(content, forceWeb = false, citationContext = null, options = {}) {
+function resetChat() {
+  state.chatMessages = [];
+  state.pendingCitationContext = null;
+  state.selectedFigures = [];
+  if (els.chatInput) {
+    els.chatInput.value = "";
+    resizeChatInput();
+    els.chatInput.focus();
+  }
+  renderChat();
+  renderChatFigureFocus();
+}
+
+async function sendChatMessage(content, forceWeb = false, citationContext = null) {
   if (!state.selectedPaper) {
     showToast("Select a paper first");
     return;
@@ -3904,9 +3918,6 @@ async function sendChatMessage(content, forceWeb = false, citationContext = null
     return;
   }
 
-  if (options.resetHistory) {
-    state.chatMessages = [];
-  }
   state.chatMessages.push({ role: "user", content });
   renderChat();
   if (els.chatInput) {
@@ -4160,13 +4171,13 @@ els.chatForm?.addEventListener("submit", (event) => {
   if (!content) {
     return;
   }
-  const resetHistory = event.submitter?.dataset?.chatAction === "reset-send";
-  sendChatMessage(content, false, state.pendingCitationContext, { resetHistory }).catch((error) => {
+  sendChatMessage(content, false, state.pendingCitationContext).catch((error) => {
     state.chatMessages.push({ role: "assistant", content: error.message || String(error) });
     renderChat();
   });
 });
 
+els.chatResetButton?.addEventListener("click", resetChat);
 els.chatInput?.addEventListener("input", resizeChatInput);
 els.chatInput?.addEventListener("keydown", submitChatOnEnter);
 syncPanelToggles();

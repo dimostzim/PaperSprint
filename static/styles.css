@@ -1214,20 +1214,10 @@ h2 {
   cursor: pointer;
 }
 
-.highlight-rect:hover,
-.highlight-rect.hover {
-  opacity: 0.54;
-}
-
 .highlight-rect.active {
   z-index: 4;
-  opacity: 0.72;
   outline: 2px solid var(--accent-strong);
   box-shadow: 0 0 0 1px var(--panel);
-}
-
-.overlay-layer:has(.highlight-rect.active) .highlight-rect:not(.active) {
-  opacity: 0.14;
 }
 
 .highlight-rect.label-goal,
@@ -1810,7 +1800,7 @@ h2 {
 
 .chat-form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 54px 104px;
+  grid-template-columns: minmax(0, 1fr) 54px 54px;
   align-items: end;
   gap: 6px;
 }

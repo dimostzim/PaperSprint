@@ -523,6 +523,58 @@ def test_provider_model_options_uses_codex_catalog(monkeypatch):
     assert provider_model_options("codex") == ["gpt-5.5", "gpt-5.3-codex-spark"]
 
 
+def test_chat_has_standalone_reset_without_sending():
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "templates" / "index.html").read_text(encoding="utf-8")
+    source = (root / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert '<button id="chat-reset-button" type="button">Reset</button>' in template
+    assert "Reset &amp; Send" not in template
+    assert "resetHistory" not in source
+
+    start = source.index("function resetChat()")
+    end = source.index("\n\nasync function sendChatMessage", start)
+    function_source = source[start:end]
+    script = f"""
+const state = {{
+  chatMessages: [{{ role: "user", content: "old question" }}],
+  pendingCitationContext: {{ id: "citation" }},
+  selectedFigures: [{{ id: "figure" }}],
+}};
+let submissions = 0;
+const els = {{ chatInput: {{ value: "draft", focus() {{}} }} }};
+function resizeChatInput() {{}}
+function renderChat() {{}}
+function renderChatFigureFocus() {{}}
+function sendChatMessage() {{ submissions += 1; }}
+{function_source}
+resetChat();
+console.log(JSON.stringify({{ ...state, draft: els.chatInput.value, submissions }}));
+"""
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    payload = json.loads(result.stdout)
+
+    assert payload == {
+        "chatMessages": [],
+        "pendingCitationContext": None,
+        "selectedFigures": [],
+        "draft": "",
+        "submissions": 0,
+    }
+
+
+def test_highlight_selection_only_adds_an_outline():
+    styles = (Path(__file__).resolve().parents[1] / "static" / "styles.css").read_text(encoding="utf-8")
+    active_start = styles.index(".highlight-rect.active {")
+    active_end = styles.index("}\n", active_start)
+    active_rule = styles[active_start:active_end]
+
+    assert "opacity:" not in active_rule
+    assert ".overlay-layer:has(.highlight-rect.active) .highlight-rect:not(.active)" not in styles
+    assert ".highlight-rect:hover" not in styles
+    assert "outline: 2px solid var(--accent-strong)" in active_rule
+
+
 def test_highlight_popover_uses_complete_text_without_truncation():
     root = Path(__file__).resolve().parents[1]
     source = (root / "static" / "app.js").read_text(encoding="utf-8")
