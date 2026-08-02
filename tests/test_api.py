@@ -111,6 +111,66 @@ def test_analysis_api_has_no_reading_depth(tmp_path, monkeypatch):
         assert "reading_depth" not in response.json()
 
 
+def test_reanalysis_lazily_restores_cached_paper_after_backend_reload(tmp_path, monkeypatch):
+    papers_dir = tmp_path / "papers"
+    figures_dir = tmp_path / "figures"
+    cache_papers_dir = tmp_path / "cache-papers"
+    cache_records_dir = tmp_path / "cache-records"
+    cache_figures_dir = tmp_path / "cache-figures"
+    for directory in (papers_dir, figures_dir, cache_papers_dir, cache_records_dir, cache_figures_dir):
+        directory.mkdir()
+    for name, value in (
+        ("PAPERS_DIR", papers_dir),
+        ("FIGURES_DIR", figures_dir),
+        ("CACHE_PAPERS_DIR", cache_papers_dir),
+        ("CACHE_RECORDS_DIR", cache_records_dir),
+        ("CACHE_FIGURES_DIR", cache_figures_dir),
+    ):
+        monkeypatch.setattr(main, name, value)
+
+    data = make_pdf_bytes("Figure 1 appears on the following page.")
+    digest = main.file_digest(data)
+    paper_id = digest[:12]
+    (cache_papers_dir / f"{digest}.pdf").write_bytes(data)
+    (cache_records_dir / f"{digest}.json").write_text(
+        json.dumps(
+            {
+                "id": paper_id,
+                "filename": "paper.pdf",
+                "stored_pdf": "paper.pdf",
+                "digest": digest,
+                "analysis_version": main.ANALYSIS_VERSION,
+                "citation_version": main.CITATION_VERSION,
+                "title": "Cached paper",
+                "analysis_status": "complete",
+                "narrative_sections": [{"heading": "Result", "highlights": [{"id": "h1", "text": "Old analysis."}]}],
+                "manual_highlights": [],
+                "figures": [],
+                "citations": [],
+                "sentences": [],
+                "full_text_chars": 42,
+            }
+        ),
+        encoding="utf-8",
+    )
+    main.PAPERS.clear()
+
+    def close_background_task(coroutine):
+        coroutine.close()
+
+    monkeypatch.setattr(main.asyncio, "create_task", close_background_task)
+
+    response = TestClient(main.app).post(
+        f"/api/papers/{paper_id}/analyze",
+        json={"provider": "codex", "reanalyze": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reanalysis_status"] == "analyzing"
+    assert paper_id in main.PAPERS
+    assert (papers_dir / f"{paper_id}-paper.pdf").exists()
+
+
 def test_get_paper_file_restores_missing_session_pdf_from_cache(tmp_path, monkeypatch):
     papers_dir = tmp_path / "papers"
     cache_papers_dir = tmp_path / "cache-papers"

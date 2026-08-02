@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -108,9 +109,24 @@ class HighlightsUpdateRequest(BaseModel):
 
 def read_paper(paper_id: str) -> dict[str, Any]:
     paper = PAPERS.get(paper_id)
-    if not paper:
-        raise HTTPException(status_code=404, detail="Paper not found.")
-    return paper
+    if paper:
+        return paper
+
+    if re.fullmatch(r"[a-f0-9]{12}", paper_id, re.IGNORECASE):
+        record_path = next(
+            (path for path in CACHE_RECORDS_DIR.glob("*.json") if path.stem.startswith(paper_id.lower())),
+            None,
+        )
+        if record_path:
+            try:
+                paper = cached_paper_from_record(record_path)
+            except (json.JSONDecodeError, OSError, RuntimeError, shutil.Error, fitz.FileDataError, fitz.EmptyFileError):
+                paper = None
+            if paper:
+                write_paper(paper)
+                return paper
+
+    raise HTTPException(status_code=404, detail="Paper not found.")
 
 
 def write_paper(paper: dict[str, Any]) -> None:
