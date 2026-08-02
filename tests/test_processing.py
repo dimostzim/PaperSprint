@@ -523,6 +523,16 @@ def test_provider_model_options_uses_codex_catalog(monkeypatch):
     assert provider_model_options("codex") == ["gpt-5.5", "gpt-5.3-codex-spark"]
 
 
+def test_highlight_category_chips_always_use_overlay_colors():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "static" / "app.js").read_text(encoding="utf-8")
+    styles = (root / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert "--facet-bg: ${hexToRgba(color, 0.32)}" in source
+    assert ".facet-chip.has-color {" in styles
+    assert "background: var(--facet-bg)" in styles[styles.index(".facet-chip.has-color {"):]
+
+
 def test_chat_has_standalone_reset_without_sending():
     root = Path(__file__).resolve().parents[1]
     template = (root / "templates" / "index.html").read_text(encoding="utf-8")

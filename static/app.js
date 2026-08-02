@@ -228,7 +228,7 @@ function facetChipStyle(facet) {
   if (!color) {
     return "";
   }
-  return ` style="--facet-color: ${color}; --facet-bg: ${hexToRgba(color, 0.26)};"`;
+  return ` style="--facet-color: ${color}; --facet-bg: ${hexToRgba(color, 0.32)};"`;
 }
 
 function showToast(message, sticky = false) {

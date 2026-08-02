@@ -848,6 +848,11 @@ h2 {
   font-size: 11px;
 }
 
+.facet-chip.has-color {
+  color: var(--ink);
+  background: var(--facet-bg);
+}
+
 .facet-chip.active {
   border-color: var(--accent);
   color: var(--accent-text);
