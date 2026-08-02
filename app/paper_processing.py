@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,7 +50,8 @@ def split_sentences(text: str) -> list[str]:
 
 
 def word_key(value: str) -> str:
-    return re.sub(r"[^\w]+", "", value.casefold(), flags=re.UNICODE)
+    normalized = unicodedata.normalize("NFKC", value).replace("\u00ad", "")
+    return re.sub(r"[^\w]+", "", normalized.casefold(), flags=re.UNICODE)
 
 
 def phrase_word_keys(value: str) -> list[str]:
@@ -125,10 +127,25 @@ def find_phrase_word_rects(page: fitz.Page, phrase: str) -> list[list[float]]:
                 )
             )
 
-    phrase_length = len(phrase_keys)
-    for start in range(0, len(indexed_words) - phrase_length + 1):
-        if [key for key, _ in indexed_words[start : start + phrase_length]] == phrase_keys:
-            return merge_word_rects([word for _, word in indexed_words[start : start + phrase_length]])
+    for start in range(len(indexed_words)):
+        page_index = start
+        phrase_index = 0
+        matched_words = []
+        while page_index < len(indexed_words) and phrase_index < len(phrase_keys):
+            key, word = indexed_words[page_index]
+            if key == phrase_keys[phrase_index]:
+                matched_words.append(word)
+                page_index += 1
+                phrase_index += 1
+                continue
+            if page_index + 1 < len(indexed_words) and key + indexed_words[page_index + 1][0] == phrase_keys[phrase_index]:
+                matched_words.extend((word, indexed_words[page_index + 1][1]))
+                page_index += 2
+                phrase_index += 1
+                continue
+            break
+        if phrase_index == len(phrase_keys):
+            return merge_word_rects(matched_words)
     return []
 
 
@@ -271,6 +288,70 @@ def find_exact_rects(
         doc.close()
 
     return None, []
+
+
+def process_narrative_sections(
+    pdf_path: Path,
+    sections: list[dict[str, Any]],
+    source_text: str,
+    figures: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Ground hidden Highlight sources without changing synthesized narrative content."""
+    figures_by_id = {str(item.get("id")): item for item in figures or [] if item.get("id")}
+    processed_sections: list[dict[str, Any]] = []
+
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        processed_highlights = []
+        for item in section.get("highlights", []):
+            if not isinstance(item, dict):
+                continue
+            source = item.get("source") if isinstance(item.get("source"), dict) else {}
+            source_type = str(source.get("type", ""))
+            page_number = None
+            rects: list[list[float]] = []
+
+            if source_type == "text":
+                anchor = normalize_text(str(source.get("anchor", "")))
+                try:
+                    page_hint = int(source.get("page_hint")) if source.get("page_hint") else None
+                except (TypeError, ValueError):
+                    page_hint = None
+                page_number, rects = find_exact_rects(pdf_path, anchor, page_hint)
+            elif source_type == "figure":
+                figure = figures_by_id.get(str(source.get("visual_id", "")))
+                if figure:
+                    page_number = figure.get("page_number")
+                    rects = [list(rect) for rect in figure.get("rects", [])]
+                    if not rects and figure.get("bbox_pct"):
+                        source["bbox_pct"] = figure.get("bbox_pct")
+
+            # Legacy quotation-shaped records remain readable only for in-memory callers;
+            # the analysis version invalidates persisted legacy data.
+            text = normalize_text(str(item.get("text") or item.get("snippet") or ""))
+            processed = {
+                **item,
+                "text": text,
+                "label": sanitize_label(str(item.get("label", "important"))),
+                "source": source,
+                "page_number": page_number,
+                "rects": rects,
+                "navigation_available": bool(page_number and (rects or source.get("bbox_pct"))),
+            }
+            processed.pop("snippet", None)
+            processed.pop("reason", None)
+            processed.pop("comment", None)
+            processed_highlights.append(processed)
+        if processed_highlights:
+            processed_sections.append(
+                {
+                    "heading": normalize_text(str(section.get("heading", "Narrative")))[:160] or "Narrative",
+                    "highlights": processed_highlights,
+                }
+            )
+
+    return {"narrative_sections": processed_sections}
 
 
 def ground_highlights(

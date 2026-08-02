@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import fitz
 from dotenv import load_dotenv
@@ -17,16 +18,22 @@ from starlette.requests import Request
 
 from .ai import (
     ANALYSIS_VERSION,
+    ModelCapacityError,
     analyze_paper,
+    build_analysis_prompt,
     answer_chat,
     answer_selection_explanation,
     provider_model_options,
     provider_status,
+    resolve_text_model,
+    model_capacity_tokens,
+    model_supports_multimodal,
+    validate_analysis_capacity,
     validate_citations,
 )
 from .citations import CITATION_VERSION, citation_has_context, extract_citations, ground_citation_rects
-from .figures import analyze_figures, ensure_figure_images, figure_directory
-from .paper_processing import extract_pdf, file_digest, find_exact_rects, public_page_sizes, slugify, sort_highlights
+from .figures import ensure_figure_images, figure_directory, prepare_visuals
+from .paper_processing import extract_pdf, file_digest, find_exact_rects, public_page_sizes, slugify
 from .web_search import search_web
 
 load_dotenv()
@@ -72,20 +79,11 @@ class ChatRequest(BaseModel):
     figure_context: list[dict[str, Any]] | None = None
 
 
-class FigureAnalysisRequest(BaseModel):
-    provider: str | None = None
-    api_key: str | None = None
-    model: str | None = None
-    reasoning_effort: str | None = None
-    force: bool = False
-    background: bool = False
-
-
 class AnalysisRequest(BaseModel):
     provider: str | None = "auto"
     api_key: str | None = None
     model: str | None = None
-    reasoning_effort: str | None = None
+    reanalyze: bool = False
 
 
 class SelectionExplainRequest(BaseModel):
@@ -104,7 +102,8 @@ class ModelsRequest(BaseModel):
 
 
 class HighlightsUpdateRequest(BaseModel):
-    highlights: list[dict[str, Any]]
+    manual_highlights: list[dict[str, Any]] | None = None
+    highlights: list[dict[str, Any]] | None = None
 
 
 def read_paper(paper_id: str) -> dict[str, Any]:
@@ -348,7 +347,7 @@ def public_figures(paper_id: str, figures: list[dict[str, Any]]) -> list[dict[st
         figure_id = figure.get("id")
         if not figure_id:
             continue
-        public_item = {key: value for key, value in figure.items() if key != "image_file"}
+        public_item = {key: value for key, value in figure.items() if key not in {"image_file", "image_path", "page_image_path"}}
         public_item["image_url"] = f"/api/papers/{paper_id}/figures/{figure_id}/image"
         public_items.append(public_item)
     return public_items
@@ -391,7 +390,11 @@ def clean_highlight_record(highlight: dict[str, Any]) -> dict[str, Any] | None:
             except (TypeError, ValueError):
                 continue
 
+    requested_id = str(highlight.get("id", ""))[:64]
+    manual_id = requested_id if requested_id.startswith("manual-") else f"manual-{uuid.uuid4().hex[:12]}"
     clean: dict[str, Any] = {
+        "id": manual_id,
+        "source": "manual",
         "label": label,
         "snippet": snippet[:900],
         "reason": " ".join(str(highlight.get("reason", "")).split()).strip()[:240],
@@ -404,6 +407,7 @@ def clean_highlight_record(highlight: dict[str, Any]) -> dict[str, Any] | None:
     color = str(highlight.get("color", "")).strip()
     if color:
         clean["color"] = color[:24]
+    clean["navigation_available"] = bool(page_number and rects)
     return clean
 
 
@@ -419,20 +423,43 @@ def ground_clean_highlight(
     if rects:
         clean["page_number"] = page_number
         clean["rects"] = rects
+        clean["navigation_available"] = True
     return clean
 
 
+def flatten_highlight_sequence(paper: dict[str, Any]) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    narrative_index = 0
+    for section_index, section in enumerate(paper.get("narrative_sections", [])):
+        for highlight in section.get("highlights", []):
+            flattened.append(
+                {
+                    **highlight,
+                    "origin": "generated",
+                    "section_index": section_index,
+                    "narrative_index": narrative_index,
+                    "navigation_available": bool(highlight.get("page_number") and highlight.get("rects")),
+                }
+            )
+            narrative_index += 1
+    return flattened
+
+
 def public_paper(paper: dict[str, Any], include_details: bool = False) -> dict[str, Any]:
-    highlights = sort_highlights(paper.get("highlights", []))
+    highlights = flatten_highlight_sequence(paper)
     citations = paper.get("citations", [])
     base = {
         "id": paper["id"],
         "filename": paper["filename"],
         "title": paper["title"],
-        "overview": paper.get("overview", ""),
         "provider_used": paper.get("provider_used", "unknown"),
-        "warnings": paper.get("warnings", []),
+        "analysis_model": paper.get("analysis_model", ""),
         "analysis_status": paper.get("analysis_status", "complete"),
+        "analysis_stage": paper.get("analysis_stage", ""),
+        "reanalysis_status": paper.get("reanalysis_status", "idle"),
+        "reanalysis_error": paper.get("reanalysis_error", ""),
+        "analysis_revision": paper.get("analysis_revision", 0),
+        "chat_available": paper.get("analysis_status") == "complete",
         "analysis_error": paper.get("analysis_error", ""),
         "highlight_count": len(highlights),
         "figure_count": len(paper.get("figures", [])),
@@ -447,14 +474,21 @@ def public_paper(paper: dict[str, Any], include_details: bool = False) -> dict[s
     if include_details:
         base.update(
             {
-                "key_takeaways": paper.get("key_takeaways", []),
-                "background_notes": paper.get("background_notes", []),
-                "read_this_first": paper.get("read_this_first", []),
-                "not_shown": paper.get("not_shown", []),
-                "code_availability": paper.get("code_availability", []),
-                "reviewer_questions": paper.get("reviewer_questions", []),
-                "glossary": paper.get("glossary", []),
+                "narrative_sections": paper.get("narrative_sections", []),
+                "manual_highlights": paper.get("manual_highlights", []),
                 "highlights": highlights,
+                "overlay_highlights": [
+                    *highlights,
+                    *[
+                        {
+                            **item,
+                            "origin": "manual",
+                            "highlightIndex": len(highlights) + index,
+                            "navigation_available": bool(item.get("page_number") and item.get("rects")),
+                        }
+                        for index, item in enumerate(paper.get("manual_highlights", []))
+                    ],
+                ],
                 "figures": public_figures(paper["id"], paper.get("figures", [])),
                 "figure_warnings": paper.get("figure_warnings", []),
                 "figure_provider_used": paper.get("figure_provider_used", "unknown"),
@@ -463,7 +497,6 @@ def public_paper(paper: dict[str, Any], include_details: bool = False) -> dict[s
                 "figure_analysis_completed_pages": paper.get("figure_analysis_completed_pages", 0),
                 "figure_analysis_total_pages": paper.get("figure_analysis_total_pages", 0),
                 "citations": paper.get("citations", []),
-                "questions": paper.get("questions", []),
                 "page_sizes": paper.get("page_sizes", []),
             }
         )
@@ -489,19 +522,13 @@ def analyzed_paper_record(
         "digest": digest,
         "analysis_version": ANALYSIS_VERSION,
         "title": analysis.get("title") or extracted.title,
-        "overview": analysis.get("overview", ""),
-        "background_notes": analysis.get("background_notes", []),
-        "key_takeaways": analysis.get("key_takeaways", []),
-        "not_shown": analysis.get("not_shown", []),
-        "code_availability": analysis.get("code_availability", []),
-        "reviewer_questions": analysis.get("reviewer_questions", []),
-        "read_this_first": analysis.get("read_this_first", []),
-        "glossary": analysis.get("glossary", []),
-        "highlights": sort_highlights(analysis.get("highlights", [])),
-        "figures": [],
+        "narrative_sections": analysis.get("narrative_sections", []),
+        "analysis_text": analysis.get("analysis_text", ""),
+        "manual_highlights": [],
+        "figures": analysis.get("figures", []),
         "figure_warnings": [],
-        "figure_provider_used": "unknown",
-        "figure_analysis_status": "idle",
+        "figure_provider_used": analysis.get("provider_used", "unknown"),
+        "figure_analysis_status": "complete",
         "figure_analysis_error": "",
         "figure_analysis_completed_pages": 0,
         "figure_analysis_total_pages": 0,
@@ -509,9 +536,8 @@ def analyzed_paper_record(
         "citation_version": CITATION_VERSION if citation_status == "complete" else 0,
         "citation_status": citation_status,
         "citation_error": citation_error,
-        "questions": analysis.get("questions", []),
         "provider_used": analysis.get("provider_used", "unknown"),
-        "warnings": analysis.get("warnings", []),
+        "analysis_model": analysis.get("analysis_model", ""),
         "page_sizes": public_page_sizes(extracted.pages),
         "sentences": [
             {
@@ -522,24 +548,13 @@ def analyzed_paper_record(
         ],
         "full_text_chars": len(extracted.full_text),
         "analysis_status": analysis_status,
+        "analysis_stage": "complete" if analysis_status == "complete" else "",
         "analysis_error": "",
+        "reanalysis_status": "idle",
+        "reanalysis_error": "",
+        "analysis_revision": 1 if analysis_status == "complete" else 0,
     }
 
-
-def build_paper_record(
-    pdf_path: Path,
-    paper_id: str,
-    filename: str,
-    provider: str | None,
-    digest: str,
-    api_key: str | None = None,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
-) -> dict[str, Any]:
-    extracted = extract_pdf(pdf_path)
-    analysis = analyze_paper(pdf_path, extracted, provider, api_key, model, reasoning_effort)
-    citations = analyze_citations_for_paper(pdf_path, extracted, provider, api_key, model, reasoning_effort)
-    return analyzed_paper_record(pdf_path, paper_id, filename, digest, extracted, analysis, citations, "complete", "complete")
 
 
 def build_uploaded_paper_record(
@@ -556,15 +571,8 @@ def build_uploaded_paper_record(
         "digest": digest,
         "analysis_version": 0,
         "title": extracted.title or Path(filename).stem,
-        "overview": "PDF loaded. Click Analyze to generate takeaways, highlights, and citations.",
-        "background_notes": [],
-        "key_takeaways": [],
-        "not_shown": [],
-        "code_availability": [],
-        "reviewer_questions": [],
-        "read_this_first": [],
-        "glossary": [],
-        "highlights": [],
+        "narrative_sections": [],
+        "manual_highlights": [],
         "figures": [],
         "figure_warnings": [],
         "figure_provider_used": "unknown",
@@ -576,9 +584,8 @@ def build_uploaded_paper_record(
         "citation_version": 0,
         "citation_status": "pending",
         "citation_error": "",
-        "questions": [],
         "provider_used": "not analyzed",
-        "warnings": [],
+        "analysis_model": "",
         "page_sizes": public_page_sizes(extracted.pages),
         "sentences": [
             {
@@ -589,7 +596,11 @@ def build_uploaded_paper_record(
         ],
         "full_text_chars": len(extracted.full_text),
         "analysis_status": "ready",
+        "analysis_stage": "",
         "analysis_error": "",
+        "reanalysis_status": "idle",
+        "reanalysis_error": "",
+        "analysis_revision": 0,
     }
 
 
@@ -601,103 +612,66 @@ def finish_paper_analysis(
     digest: str,
     api_key: str | None = None,
     model: str | None = None,
-    reasoning_effort: str | None = None,
+    prepared_extracted: Any | None = None,
+    prepared_visuals: list[dict[str, Any]] | None = None,
+    is_reanalysis: bool = False,
 ) -> None:
     try:
-        extracted = extract_pdf(pdf_path)
-        analysis = analyze_paper(pdf_path, extracted, provider, api_key, model, reasoning_effort)
+        extracted = prepared_extracted or extract_pdf(pdf_path)
+        latest = PAPERS.get(paper_id, {})
+        latest["analysis_stage"] = "Preparing figures and tables"
+        write_paper(latest)
+        visuals = prepared_visuals if prepared_visuals is not None else prepare_visuals(pdf_path, extracted, FIGURES_DIR, paper_id)
+        latest["analysis_stage"] = "Building the Highlight sequence"
+        write_paper(latest)
+        analysis = analyze_paper(pdf_path, extracted, provider, api_key, model, "high", visuals)
+        latest["analysis_stage"] = "Finalizing source links"
+        write_paper(latest)
+        analysis["analysis_model"] = resolve_text_model(model)
     except Exception as error:
         pending = PAPERS.get(paper_id)
         if pending:
-            pending["analysis_status"] = "error"
-            pending["analysis_error"] = str(error)
-            pending["overview"] = "Analysis failed."
+            if is_reanalysis:
+                pending["reanalysis_status"] = "error"
+                pending["reanalysis_error"] = str(error)
+            else:
+                pending["analysis_status"] = "error"
+                pending["analysis_error"] = str(error)
+            pending["analysis_stage"] = ""
+            write_paper(pending)
         return
 
     existing = PAPERS.get(paper_id, {})
     paper = analyzed_paper_record(
-        pdf_path,
-        paper_id,
-        filename,
-        digest,
-        extracted,
-        analysis,
-        [],
-        "analyzing",
-        "analyzing",
+        pdf_path, paper_id, filename, digest, extracted, analysis,
+        existing.get("citations", []), existing.get("citation_status", "pending"), "complete",
     )
-    paper["figures"] = existing.get("figures", [])
-    paper["figure_warnings"] = existing.get("figure_warnings", [])
-    paper["figure_provider_used"] = existing.get("figure_provider_used", "unknown")
-    paper["figure_analysis_status"] = existing.get("figure_analysis_status", "complete" if paper["figures"] else "idle")
-    paper["figure_analysis_error"] = existing.get("figure_analysis_error", "")
-    paper["figure_analysis_completed_pages"] = existing.get("figure_analysis_completed_pages", 0)
-    paper["figure_analysis_total_pages"] = existing.get("figure_analysis_total_pages", 0)
-    write_paper(paper)
-
-    try:
-        citations = analyze_citations_for_paper(pdf_path, extracted, provider, api_key, model, reasoning_effort)
-        paper["citations"] = citations
-        paper["citation_version"] = CITATION_VERSION
-        paper["citation_status"] = "complete"
-        paper["citation_error"] = ""
-    except Exception as error:
-        paper["citations"] = []
-        paper["citation_version"] = 0
-        paper["citation_status"] = "error"
-        paper["citation_error"] = str(error)
-
-    paper["analysis_status"] = "complete"
+    paper["manual_highlights"] = existing.get("manual_highlights", [])
+    paper["analysis_revision"] = int(existing.get("analysis_revision", 0)) + 1
+    paper["reanalysis_status"] = "idle"
+    paper["analysis_stage"] = "complete"
     write_paper(paper)
     cache_paper(paper, pdf_path)
 
-
-def finish_figure_analysis(
-    pdf_path: Path,
-    paper_id: str,
-    provider: str | None,
-    api_key: str | None = None,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
-) -> None:
-    def publish_progress(progress: dict[str, Any]) -> None:
-        latest = PAPERS.get(paper_id)
-        if not latest:
-            return
-        latest.update(progress)
-        latest["figure_analysis_status"] = "running"
-        latest["figure_analysis_error"] = ""
-        write_paper(latest)
-
+    # Citations are useful but cannot block the installed analysis snapshot.
     try:
-        extracted = extract_pdf(pdf_path)
-        result = analyze_figures(
-            pdf_path,
-            extracted,
-            paper_id,
-            FIGURES_DIR,
-            provider,
-            api_key,
-            model,
-            reasoning_effort,
-            publish_progress,
-        )
+        citations = analyze_citations_for_paper(pdf_path, extracted, provider, api_key, model, "high")
+        latest = PAPERS.get(paper_id)
+        if latest and latest.get("analysis_revision") == paper["analysis_revision"]:
+            latest["citations"] = citations
+            latest["citation_version"] = CITATION_VERSION
+            latest["citation_status"] = "complete"
+            latest["citation_error"] = ""
+            write_paper(latest)
+            cache_paper(latest, pdf_path)
     except Exception as error:
         latest = PAPERS.get(paper_id)
         if latest:
-            latest["figure_analysis_status"] = "error"
-            latest["figure_analysis_error"] = str(error)
+            latest["citation_status"] = "error"
+            latest["citation_error"] = str(error)
             write_paper(latest)
-        return
 
-    latest = PAPERS.get(paper_id)
-    if not latest:
-        return
-    latest.update(result)
-    latest["figure_analysis_status"] = "complete"
-    latest["figure_analysis_error"] = ""
-    write_paper(latest)
-    cache_paper(latest, pdf_path)
+
 
 
 @app.get("/")
@@ -705,9 +679,6 @@ def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 
-@app.get("/figures/{paper_id}")
-def figures_page(request: Request, paper_id: str):
-    return templates.TemplateResponse("figures.html", {"request": request, "paper_id": paper_id})
 
 
 @app.get("/api/settings")
@@ -720,8 +691,16 @@ async def list_provider_models(request: ModelsRequest):
     provider = request.provider or "auto"
     if provider not in {"auto", "codex", "openai", "openrouter"}:
         raise HTTPException(status_code=400, detail="Unknown AI provider.")
-    models = await asyncio.to_thread(provider_model_options, provider, request.api_key)
-    return {"provider": provider, "model_options": models}
+    models = [
+        model
+        for model in await asyncio.to_thread(provider_model_options, provider, request.api_key)
+        if model_supports_multimodal(model)
+    ]
+    return {
+        "provider": provider,
+        "model_options": models,
+        "model_capacities": {model: model_capacity_tokens(model) for model in models},
+    }
 
 
 @app.get("/api/papers")
@@ -781,37 +760,47 @@ async def analyze_uploaded_paper(paper_id: str, request: AnalysisRequest):
         raise HTTPException(status_code=502, detail="The local fallback provider has been removed.")
     pdf_path = paper_pdf_path(paper)
 
-    if paper.get("analysis_status") == "analyzing":
+    if paper.get("analysis_status") == "analyzing" or paper.get("reanalysis_status") == "analyzing":
         return public_paper(paper, include_details=True)
     if (
-        paper.get("analysis_status") == "complete"
-        and paper.get("highlights")
+        not request.reanalyze
+        and paper.get("analysis_status") == "complete"
+        and paper.get("narrative_sections")
         and paper.get("analysis_version") == ANALYSIS_VERSION
         and paper.get("citation_version") == CITATION_VERSION
     ):
         return public_paper(paper, include_details=True)
 
-    paper.update(
-        {
-            "overview": "Analysis is running.",
-            "background_notes": [],
-            "key_takeaways": [],
-            "not_shown": [],
-            "code_availability": [],
-            "reviewer_questions": [],
-            "read_this_first": [],
-            "glossary": [],
-            "highlights": [],
-            "questions": [],
-            "citations": [],
-            "citation_status": "analyzing",
-            "citation_error": "",
-            "provider_used": "pending",
-            "warnings": [],
-            "analysis_status": "analyzing",
-            "analysis_error": "",
-        }
-    )
+    try:
+        extracted = await asyncio.to_thread(extract_pdf, pdf_path)
+        visuals = await asyncio.to_thread(prepare_visuals, pdf_path, extracted, FIGURES_DIR, paper_id)
+        image_paths = list(dict.fromkeys(
+            Path(path)
+            for item in visuals
+            for path in (item.get("image_path"), item.get("page_image_path"))
+            if path
+        ))
+        validate_analysis_capacity(build_analysis_prompt(extracted, visuals), request.model, image_paths)
+    except ModelCapacityError as error:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "model_capacity_exceeded",
+                "message": str(error),
+                "model": error.model,
+                "required_tokens": error.required_tokens,
+                "capacity_tokens": error.capacity_tokens,
+            },
+        ) from error
+
+    is_reanalysis = paper.get("analysis_status") == "complete"
+    if is_reanalysis:
+        paper["reanalysis_status"] = "analyzing"
+        paper["reanalysis_error"] = ""
+    else:
+        paper["analysis_status"] = "analyzing"
+        paper["analysis_error"] = ""
+    paper["analysis_stage"] = "Preparing paper text"
     write_paper(paper)
 
     asyncio.create_task(
@@ -824,7 +813,9 @@ async def analyze_uploaded_paper(paper_id: str, request: AnalysisRequest):
             paper.get("digest", ""),
             request.api_key,
             request.model,
-            request.reasoning_effort,
+            extracted,
+            visuals,
+            is_reanalysis,
         )
     )
     return public_paper(paper, include_details=True)
@@ -842,17 +833,47 @@ def update_paper_highlights(paper_id: str, request: HighlightsUpdateRequest):
         pdf_path = paper_pdf_path(paper)
     except HTTPException:
         pdf_path = PAPERS_DIR / str(paper.get("stored_pdf", ""))
-    highlights = [
+    requested = request.manual_highlights if request.manual_highlights is not None else request.highlights or []
+    manual_highlights = [
         ground_clean_highlight(clean, item, pdf_path)
-        for item in request.highlights[:120]
+        for item in requested[:120]
         if (clean := clean_highlight_record(item))
     ]
-    paper["highlights"] = sort_highlights(highlights)
+    paper["manual_highlights"] = manual_highlights
     write_paper(paper)
 
     if pdf_path.exists():
         cache_paper(paper, pdf_path)
 
+    return public_paper(paper, include_details=True)
+
+
+@app.delete("/api/papers/{paper_id}/highlights/{highlight_id}")
+def delete_highlight(
+    paper_id: str,
+    highlight_id: str,
+    source: Literal["generated", "manual"],
+):
+    paper = read_paper(paper_id)
+    if source == "generated":
+        raise HTTPException(status_code=409, detail="Generated Highlights are immutable; use reanalysis to replace them.")
+    sections = []
+    for section in paper.get("narrative_sections", []):
+        highlights = [
+            item
+            for item in section.get("highlights", [])
+            if source == "manual" or item.get("id") != highlight_id
+        ]
+        if highlights:
+            sections.append({**section, "highlights": highlights})
+    paper["narrative_sections"] = sections
+    if source != "generated":
+        paper["manual_highlights"] = [item for item in paper.get("manual_highlights", []) if item.get("id") != highlight_id]
+    write_paper(paper)
+    try:
+        cache_paper(paper, paper_pdf_path(paper))
+    except HTTPException:
+        pass
     return public_paper(paper, include_details=True)
 
 
@@ -882,72 +903,6 @@ def get_figures(paper_id: str):
     return figure_analysis_response(paper_id, read_paper(paper_id))
 
 
-@app.post("/api/papers/{paper_id}/figures/analyze")
-async def analyze_paper_figures(paper_id: str, request: FigureAnalysisRequest):
-    paper = read_paper(paper_id)
-    if paper.get("figure_analysis_status") == "running":
-        return figure_analysis_response(paper_id, paper)
-    if paper.get("figures") and not request.force:
-        return figure_analysis_response(paper_id, paper)
-
-    pdf_path = paper_pdf_path(paper)
-
-    paper.update(
-        {
-            "figures": [],
-            "figure_warnings": [],
-            "figure_provider_used": "pending",
-            "figure_analysis_status": "running",
-            "figure_analysis_error": "",
-            "figure_analysis_completed_pages": 0,
-            "figure_analysis_total_pages": 0,
-        }
-    )
-    write_paper(paper)
-    if request.force:
-        shutil.rmtree(figure_directory(FIGURES_DIR, paper_id), ignore_errors=True)
-    if request.background:
-        asyncio.create_task(
-            asyncio.to_thread(
-                finish_figure_analysis,
-                pdf_path,
-                paper_id,
-                request.provider,
-                request.api_key,
-                request.model,
-                request.reasoning_effort,
-            )
-        )
-        return figure_analysis_response(paper_id, paper)
-
-    try:
-        extracted = await asyncio.to_thread(extract_pdf, pdf_path)
-        result = await asyncio.to_thread(
-            analyze_figures,
-            pdf_path,
-            extracted,
-            paper_id,
-            FIGURES_DIR,
-            request.provider,
-            request.api_key,
-            request.model,
-            request.reasoning_effort,
-        )
-    except Exception as error:
-        latest_paper = PAPERS.get(paper_id)
-        if latest_paper:
-            latest_paper["figure_analysis_status"] = "error"
-            latest_paper["figure_analysis_error"] = str(error)
-            write_paper(latest_paper)
-        raise HTTPException(status_code=502, detail=str(error)) from error
-
-    latest_paper = read_paper(paper_id)
-    latest_paper.update(result)
-    latest_paper["figure_analysis_status"] = "complete"
-    latest_paper["figure_analysis_error"] = ""
-    write_paper(latest_paper)
-    cache_paper(latest_paper, pdf_path)
-    return figure_analysis_response(paper_id, latest_paper)
 
 
 @app.get("/api/papers/{paper_id}/figures/{figure_id}/image")
@@ -973,6 +928,8 @@ def get_figure_image(paper_id: str, figure_id: str):
 @app.post("/api/papers/{paper_id}/chat")
 async def chat_with_paper(paper_id: str, request: ChatRequest):
     paper = read_paper(paper_id)
+    if paper.get("analysis_status") != "complete":
+        raise HTTPException(status_code=409, detail="Analyze this paper before starting Chat.")
     messages = [
         {"role": message.role, "content": message.content}
         for message in request.messages
@@ -995,12 +952,12 @@ async def chat_with_paper(paper_id: str, request: ChatRequest):
             paper,
             messages,
             web_results,
-            request.provider,
+            paper.get("provider_used") or request.provider,
             request.citation_context,
             request.api_key,
             request.figure_context,
-            request.model,
-            request.reasoning_effort,
+            paper.get("analysis_model") or request.model,
+            "high",
         )
     except Exception as error:
         raise HTTPException(status_code=502, detail=str(error)) from error

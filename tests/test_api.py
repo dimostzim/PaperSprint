@@ -4,7 +4,7 @@ import time
 import fitz
 from fastapi.testclient import TestClient
 
-from app import main
+from app import main, paper_processing
 
 
 def make_pdf_bytes(text: str = "Readable paper text.") -> bytes:
@@ -37,7 +37,7 @@ def test_upload_rejects_unreadable_pdf_and_removes_file(tmp_path, monkeypatch):
 def test_analyze_preserves_extracted_metadata_while_running(tmp_path, monkeypatch):
     papers_dir = tmp_path / "papers"
     papers_dir.mkdir()
-    (papers_dir / "paper.pdf").write_bytes(b"%PDF-1.4\n")
+    (papers_dir / "paper.pdf").write_bytes(make_pdf_bytes("This paper has extracted text ready for analysis."))
     monkeypatch.setattr(main, "PAPERS_DIR", papers_dir)
     main.PAPERS.clear()
 
@@ -80,9 +80,35 @@ def test_analyze_preserves_extracted_metadata_while_running(tmp_path, monkeypatc
 
     assert response.status_code == 200
     assert main.PAPERS["paper-1"]["analysis_status"] == "analyzing"
+    assert "reading_depth" not in main.PAPERS["paper-1"]
     assert main.PAPERS["paper-1"]["page_sizes"] == page_sizes
     assert main.PAPERS["paper-1"]["sentences"] == sentences
     assert main.PAPERS["paper-1"]["full_text_chars"] == 120
+
+
+def test_analysis_api_has_no_reading_depth(tmp_path, monkeypatch):
+    papers_dir = tmp_path / "papers"
+    papers_dir.mkdir()
+    monkeypatch.setattr(main, "PAPERS_DIR", papers_dir)
+    main.PAPERS.clear()
+    for index in range(1, 4):
+        filename = f"paper-{index}.pdf"
+        (papers_dir / filename).write_bytes(make_pdf_bytes(f"Readable paper {index}."))
+        main.PAPERS[f"paper-{index}"] = {
+            "id": f"paper-{index}", "filename": filename, "stored_pdf": filename,
+            "title": "Paper", "analysis_status": "ready", "full_text_chars": 20,
+            "narrative_sections": [], "manual_highlights": [], "figures": [], "citations": [],
+        }
+
+    def close_background_task(coroutine):
+        coroutine.close()
+
+    monkeypatch.setattr(main.asyncio, "create_task", close_background_task)
+    client = TestClient(main.app)
+    for index in range(1, 4):
+        response = client.post(f"/api/papers/paper-{index}/analyze", json={"provider": "codex"})
+        assert response.status_code == 200
+        assert "reading_depth" not in response.json()
 
 
 def test_get_paper_file_restores_missing_session_pdf_from_cache(tmp_path, monkeypatch):
@@ -264,6 +290,47 @@ def test_finish_paper_analysis_generates_citations(tmp_path, monkeypatch):
     assert cached_record["citations"][0]["label"] == "[1]"
 
 
+def test_reanalysis_replaces_generated_sequence_and_preserves_manual_highlights(tmp_path, monkeypatch):
+    papers_dir = tmp_path / "papers"
+    cache_papers_dir = tmp_path / "cache-papers"
+    cache_records_dir = tmp_path / "cache-records"
+    cache_figures_dir = tmp_path / "cache-figures"
+    figures_dir = tmp_path / "figures"
+    for directory in (papers_dir, cache_papers_dir, cache_records_dir, cache_figures_dir, figures_dir):
+        directory.mkdir()
+    monkeypatch.setattr(main, "PAPERS_DIR", papers_dir)
+    monkeypatch.setattr(main, "CACHE_PAPERS_DIR", cache_papers_dir)
+    monkeypatch.setattr(main, "CACHE_RECORDS_DIR", cache_records_dir)
+    monkeypatch.setattr(main, "CACHE_FIGURES_DIR", cache_figures_dir)
+    monkeypatch.setattr(main, "FIGURES_DIR", figures_dir)
+    data = make_pdf_bytes("New generated evidence appears here.")
+    pdf_path = papers_dir / "paper.pdf"
+    pdf_path.write_bytes(data)
+    main.PAPERS.clear()
+    main.PAPERS["paper-1"] = {
+        "id": "paper-1", "filename": "paper.pdf", "stored_pdf": "paper.pdf", "digest": main.file_digest(data),
+        "title": "Paper", "manual_highlights": [{"id": "manual-1", "label": "problem", "snippet": "My note."}],
+        "narrative_sections": [{"heading": "Old", "highlights": [{"id": "old", "text": "Old.", "source": {"type": "text", "anchor": "Old.", "page_hint": 1}}]}],
+        "figures": [],
+    }
+
+    monkeypatch.setattr(main, "prepare_visuals", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main, "analyze_paper", lambda *_args, **_kwargs: {
+        "title": "Paper", "narrative_sections": [
+            {"heading": "New", "highlights": [{"id": "new", "label": "result", "text": "New synthesized result.", "source": {"type": "text", "anchor": "New generated evidence appears here.", "page_hint": 1}, "page_number": 1, "rects": [[1, 1, 2, 2]], "navigation_available": True}]}
+        ], "figures": [], "provider_used": "test",
+    })
+    monkeypatch.setattr(main, "analyze_citations_for_paper", lambda *_args, **_kwargs: [])
+
+    main.finish_paper_analysis(pdf_path, "paper-1", "paper.pdf", "codex", main.file_digest(data))
+
+    paper = main.PAPERS["paper-1"]
+    assert paper["narrative_sections"][0]["highlights"][0]["id"] == "new"
+    assert paper["manual_highlights"] == [{"id": "manual-1", "label": "problem", "snippet": "My note."}]
+    assert [item["id"] for item in main.public_paper(paper, True)["highlights"]] == ["new"]
+    assert "reading_depth" not in paper
+
+
 def test_upload_uses_cached_completed_analysis(tmp_path, monkeypatch):
     papers_dir = tmp_path / "papers"
     figures_dir = tmp_path / "figures"
@@ -297,7 +364,9 @@ def test_upload_uses_cached_completed_analysis(tmp_path, monkeypatch):
         "key_takeaways": ["Cached takeaway"],
         "read_this_first": [],
         "glossary": [],
-        "highlights": [{"label": "goal", "snippet": "Cached highlight", "reason": "Cached"}],
+        "reading_depth": "Balanced",
+        "narrative_sections": [{"heading": "Argument", "highlights": [{"id": "h1", "label": "problem", "snippet": "Cached highlight", "reason": "Cached"}]}],
+        "manual_highlights": [],
         "figures": [{"id": "p1-1", "image_file": "p1-1.jpg", "label": "Figure 1"}],
         "figure_warnings": [],
         "figure_provider_used": "codex",
@@ -556,7 +625,9 @@ def test_refresh_cache_loads_cached_papers_and_figures(tmp_path, monkeypatch):
         "key_takeaways": ["Cached takeaway"],
         "read_this_first": [],
         "glossary": [],
-        "highlights": [{"label": "goal", "snippet": "Cached highlight", "reason": "Cached"}],
+        "reading_depth": "Balanced",
+        "narrative_sections": [{"heading": "Argument", "highlights": [{"id": "h1", "label": "problem", "snippet": "Cached highlight", "reason": "Cached"}]}],
+        "manual_highlights": [],
         "figures": [{"id": "p1-1", "image_file": "p1-1.jpg", "label": "Figure 1"}],
         "figure_warnings": [],
         "figure_provider_used": "codex",
@@ -697,6 +768,25 @@ def test_upload_ignores_stale_cached_analysis(tmp_path, monkeypatch):
     assert main.PAPERS[digest[:12]]["figures"][0]["id"] == "p1-1"
 
 
+def test_generated_highlights_are_immutable_but_manual_highlights_can_be_deleted():
+    main.PAPERS.clear()
+    main.PAPERS["paper-1"] = {
+        "id": "paper-1", "filename": "paper.pdf", "title": "Paper",
+        "narrative_sections": [{"heading": "Narrative", "highlights": [{"id": "h1", "text": "Generated."}]}],
+        "manual_highlights": [{"id": "manual-1", "snippet": "Mine."}],
+        "figures": [], "citations": [], "analysis_status": "complete",
+    }
+    client = TestClient(main.app)
+
+    generated = client.delete("/api/papers/paper-1/highlights/h1?source=generated")
+    manual = client.delete("/api/papers/paper-1/highlights/manual-1?source=manual")
+
+    assert generated.status_code == 409
+    assert main.PAPERS["paper-1"]["narrative_sections"][0]["highlights"][0]["id"] == "h1"
+    assert manual.status_code == 200
+    assert main.PAPERS["paper-1"]["manual_highlights"] == []
+
+
 def test_delete_paper_removes_session_files(tmp_path, monkeypatch):
     papers_dir = tmp_path / "papers"
     figures_dir = tmp_path / "figures"
@@ -834,14 +924,15 @@ def test_update_highlights_persists_to_cache(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["highlight_count"] == 1
-    assert payload["highlights"][0]["label"] == "custom finding"
-    assert payload["highlights"][0]["color"] == "#bb66cc"
-    assert payload["highlights"][0]["comment"] == "This explains why the selected sentence matters."
+    assert payload["highlight_count"] == 0
+    assert payload["manual_highlights"][0]["id"].startswith("manual-")
+    assert payload["manual_highlights"][0]["label"] == "custom finding"
+    assert payload["manual_highlights"][0]["color"] == "#bb66cc"
+    assert payload["manual_highlights"][0]["comment"] == "This explains why the selected sentence matters."
     cached_record = json.loads((cache_records_dir / "digest-1.json").read_text(encoding="utf-8"))
-    assert cached_record["highlights"][0]["snippet"] == "This manually selected sentence should stay highlighted."
-    assert cached_record["highlights"][0]["color"] == "#bb66cc"
-    assert cached_record["highlights"][0]["comment"] == "This explains why the selected sentence matters."
+    assert cached_record["manual_highlights"][0]["snippet"] == "This manually selected sentence should stay highlighted."
+    assert cached_record["manual_highlights"][0]["color"] == "#bb66cc"
+    assert cached_record["manual_highlights"][0]["comment"] == "This explains why the selected sentence matters."
 
 
 def test_update_manual_highlight_regrounds_to_selected_page(tmp_path, monkeypatch):
@@ -900,60 +991,134 @@ def test_update_manual_highlight_regrounds_to_selected_page(tmp_path, monkeypatc
     )
 
     assert response.status_code == 200
-    highlight = response.json()["highlights"][0]
+    highlight = response.json()["manual_highlights"][0]
     assert highlight["page_number"] == 2
     assert highlight["rects"] != [[1, 1, 2, 2]]
     assert highlight["rects"][0][1] > 100
 
 
-def test_background_figure_analysis_returns_running_status(tmp_path, monkeypatch):
-    papers_dir = tmp_path / "papers"
-    figures_dir = tmp_path / "figures"
-    cache_papers_dir = tmp_path / "cache-papers"
-    cache_records_dir = tmp_path / "cache-records"
-    cache_figures_dir = tmp_path / "cache-figures"
-    for directory in (papers_dir, figures_dir, cache_papers_dir, cache_records_dir, cache_figures_dir):
-        directory.mkdir()
-    monkeypatch.setattr(main, "PAPERS_DIR", papers_dir)
-    monkeypatch.setattr(main, "FIGURES_DIR", figures_dir)
-    monkeypatch.setattr(main, "CACHE_PAPERS_DIR", cache_papers_dir)
-    monkeypatch.setattr(main, "CACHE_RECORDS_DIR", cache_records_dir)
-    monkeypatch.setattr(main, "CACHE_FIGURES_DIR", cache_figures_dir)
+def test_analysis_api_persists_synthesized_narrative_and_unavailable_source(tmp_path, monkeypatch):
+    papers_dir = tmp_path / "papers"; figures_dir = tmp_path / "figures"
+    cache_papers_dir = tmp_path / "cache-papers"; cache_records_dir = tmp_path / "cache-records"; cache_figures_dir = tmp_path / "cache-figures"
+    for directory in (papers_dir, figures_dir, cache_papers_dir, cache_records_dir, cache_figures_dir): directory.mkdir()
+    for name, value in (("PAPERS_DIR", papers_dir), ("FIGURES_DIR", figures_dir), ("CACHE_PAPERS_DIR", cache_papers_dir), ("CACHE_RECORDS_DIR", cache_records_dir), ("CACHE_FIGURES_DIR", cache_figures_dir)):
+        monkeypatch.setattr(main, name, value)
+    monkeypatch.setattr(main, "analyze_citations_for_paper", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main, "prepare_visuals", lambda *_args, **_kwargs: [])
     main.PAPERS.clear()
+    source = "The paper reports evidence on the second page."
+    doc = fitz.open(); doc.new_page().insert_text((72,72), "Introduction."); doc.new_page().insert_text((72,72), source); data=doc.tobytes(); doc.close()
 
-    pdf_path = papers_dir / "paper.pdf"
-    pdf_path.write_bytes(make_pdf_bytes("Figure 1: Result plot."))
-    main.PAPERS["paper-1"] = {
+    def fake_run_ai(*_args, **_kwargs):
+        return json.dumps({"title":"Narrative paper","narrative_sections":[{"heading":"Evidence","highlights":[
+            {"id":"h1","text":"The evaluation supports the proposed approach.","label":"result","source":{"type":"text","anchor":source,"page_hint":2}},
+            {"id":"h2","text":"A second synthesized point remains useful without navigation.","label":"limitation","source":{"type":"text","anchor":"Unlocatable but structurally valid anchor.","page_hint":2}}
+        ]}],"figures":[]}), "test"
+    monkeypatch.setattr("app.ai.run_ai", fake_run_ai)
+    client=TestClient(main.app)
+    uploaded=client.post("/api/upload",files={"file":("paper.pdf",data,"application/pdf")}).json()
+    payload=client.post(f"/api/papers/{uploaded['id']}/analyze",json={"provider":"codex"}).json()
+    for _ in range(50):
+        if payload["analysis_status"] != "analyzing": break
+        time.sleep(.01); payload=client.get(f"/api/papers/{uploaded['id']}").json()
+    assert payload["analysis_status"] == "complete"
+    assert [item["text"] for item in payload["highlights"]] == ["The evaluation supports the proposed approach.", "A second synthesized point remains useful without navigation."]
+    assert [item["navigation_available"] for item in payload["highlights"]] == [True, False]
+    assert "sequence_warnings" not in payload
+    digest=main.PAPERS[uploaded["id"]]["digest"]
+    cached=json.loads((cache_records_dir/f"{digest}.json").read_text())
+    assert [h["id"] for sec in cached["narrative_sections"] for h in sec["highlights"]] == ["h1","h2"]
+
+
+def test_public_paper_preserves_narrative_order_and_excludes_manual_highlights():
+    paper = {
         "id": "paper-1",
         "filename": "paper.pdf",
-        "stored_pdf": "paper.pdf",
-        "digest": "digest-1",
-        "title": "Readable paper",
-        "highlights": [],
+        "title": "Narrative paper",
+        "reading_depth": "Deep",
+        "narrative_sections": [
+            {"heading": "Conclusion first", "highlights": [
+                {"id": "h-late", "label": "result", "snippet": "Late page evidence.", "page_number": 8, "rects": [[1, 80, 20, 90]]},
+            ]},
+            {"heading": "Earlier source", "highlights": [
+                {"id": "h-early", "label": "method", "snippet": "Earlier page method.", "page_number": 2, "rects": [[1, 10, 20, 20]]},
+            ]},
+        ],
+        "manual_highlights": [
+            {"id": "manual-1", "label": "problem", "snippet": "Personal note.", "page_number": 1, "rects": [[1, 1, 2, 2]]},
+        ],
         "figures": [],
-        "figure_warnings": [],
-        "figure_provider_used": "unknown",
         "citations": [],
-        "page_sizes": [],
-        "analysis_status": "complete",
     }
 
-    def fake_finish_figure_analysis(*args, **kwargs):
-        time.sleep(0.05)
+    payload = main.public_paper(paper, include_details=True)
 
-    monkeypatch.setattr(main, "finish_figure_analysis", fake_finish_figure_analysis)
+    assert [item["id"] for item in payload["highlights"]] == ["h-late", "h-early"]
+    assert [item["origin"] for item in payload["highlights"]] == ["generated", "generated"]
+    assert [item["narrative_index"] for item in payload["highlights"]] == [0, 1]
+    assert payload["manual_highlights"][0]["id"] == "manual-1"
+    assert "reading_depth" not in payload
 
-    client = TestClient(main.app)
-    response = client.post(
-        "/api/papers/paper-1/figures/analyze",
-        json={"provider": "codex", "background": True},
+
+def test_analysis_capacity_error_does_not_mutate_paper_or_schedule_model(tmp_path, monkeypatch):
+    papers_dir = tmp_path / "papers"
+    papers_dir.mkdir()
+    pdf_path = papers_dir / "paper.pdf"
+    pdf_path.write_bytes(make_pdf_bytes())
+    monkeypatch.setattr(main, "PAPERS_DIR", papers_dir)
+    main.PAPERS.clear()
+    main.PAPERS["paper-1"] = {
+        "id": "paper-1", "filename": "paper.pdf", "stored_pdf": "paper.pdf", "title": "Large paper",
+        "overview": "Ready.", "analysis_status": "ready", "full_text_chars": 2_000_000,
+        "narrative_sections": [], "manual_highlights": [], "figures": [], "citations": [],
+    }
+    scheduled = []
+    monkeypatch.setattr(main.asyncio, "create_task", lambda task: scheduled.append(task))
+    monkeypatch.setattr("app.ai.model_capacity_tokens", lambda _model: 100)
+
+    response = TestClient(main.app).post("/api/papers/paper-1/analyze", json={"provider": "codex", "model": "small-model"})
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "model_capacity_exceeded"
+    assert main.PAPERS["paper-1"]["analysis_status"] == "ready"
+    assert main.PAPERS["paper-1"]["overview"] == "Ready."
+    assert scheduled == []
+
+
+
+def test_chat_requires_successful_analysis(monkeypatch):
+    main.PAPERS.clear()
+    main.PAPERS["paper-1"] = {"id": "paper-1", "filename": "paper.pdf", "title": "Paper", "analysis_status": "ready"}
+
+    response = TestClient(main.app).post(
+        "/api/papers/paper-1/chat",
+        json={"messages": [{"role": "user", "content": "Explain the paper"}]},
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["status"] == "running"
-    assert payload["figures"] == []
-    assert main.PAPERS["paper-1"]["figure_analysis_status"] == "running"
+    assert response.status_code == 409
+
+
+def test_failed_reanalysis_preserves_installed_narrative_and_manual_highlights(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(make_pdf_bytes("Existing source."))
+    main.PAPERS.clear()
+    original_sections = [{"heading": "Existing", "highlights": [{"id": "h1", "text": "Existing narrative."}]}]
+    main.PAPERS["paper-1"] = {
+        "id": "paper-1", "filename": "paper.pdf", "stored_pdf": "paper.pdf", "digest": "digest",
+        "title": "Paper", "analysis_status": "complete", "analysis_revision": 2,
+        "narrative_sections": original_sections, "manual_highlights": [{"id": "manual-1", "snippet": "Mine"}],
+    }
+    monkeypatch.setattr(main, "prepare_visuals", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(main, "analyze_paper", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("model failed")))
+
+    main.finish_paper_analysis(pdf_path, "paper-1", "paper.pdf", "codex", "digest", is_reanalysis=True)
+
+    paper = main.PAPERS["paper-1"]
+    assert paper["analysis_status"] == "complete"
+    assert paper["analysis_revision"] == 2
+    assert paper["narrative_sections"] == original_sections
+    assert paper["manual_highlights"][0]["id"] == "manual-1"
+    assert paper["reanalysis_status"] == "error"
 
 
 def test_chat_passes_figure_context(monkeypatch):
@@ -966,6 +1131,7 @@ def test_chat_passes_figure_context(monkeypatch):
         "overview": "Paper overview.",
         "key_takeaways": [],
         "sentences": [],
+        "analysis_status": "complete",
     }
     captured = {}
 

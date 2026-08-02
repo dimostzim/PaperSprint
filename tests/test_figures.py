@@ -1,13 +1,11 @@
-import threading
-import time
+from pathlib import Path
 
 import fitz
 
 from app.figures import (
-    analyze_figures,
     coerce_bbox_pct,
     crop_figure_image,
-    normalize_figure_items,
+    prepare_visuals,
     render_page_image,
     visual_candidate_pages,
 )
@@ -19,30 +17,6 @@ def test_coerce_bbox_pct_clamps_and_orders_values():
     assert coerce_bbox_pct(["bad", 0, 1, 2]) == [0.0, 0.0, 100.0, 100.0]
     assert coerce_bbox_pct([1, 1, 1.5, 50]) == [0.0, 0.0, 100.0, 100.0]
 
-
-def test_normalize_figure_items_keeps_structured_visual_notes():
-    payload = {
-        "figures": [
-            {
-                "type": "Plot",
-                "label": "Figure 1",
-                "title": "Result curve",
-                "bbox_pct": [10, 20, 80, 70],
-                "caption": "Accuracy by method.",
-                "explanation": "The plot compares methods.",
-                "why_it_matters": "It carries the main result.",
-                "uncertainty": "Axis labels are small.",
-            },
-            {"type": "paragraph", "title": ""},
-        ]
-    }
-
-    figures = normalize_figure_items(payload, 3)
-
-    assert len(figures) == 1
-    assert figures[0]["page_number"] == 3
-    assert figures[0]["type"] == "plot"
-    assert figures[0]["bbox_pct"] == [10.0, 20.0, 80.0, 70.0]
 
 
 def test_render_page_and_crop_figure_images(tmp_path):
@@ -66,6 +40,61 @@ def test_render_page_and_crop_figure_images(tmp_path):
     assert crop_image.stat().st_size > 0
 
 
+def test_prepare_visuals_ignores_page_furniture_drawings_without_visual_cue(tmp_path):
+    pdf_path = tmp_path / "title-page.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_text((50, 120), "A paper title and abstract")
+    for y in (75, 205, 706):
+        page.draw_line((48, y), (553, y))
+    doc.save(pdf_path)
+    doc.close()
+    extracted = ExtractedPaper("Paper", "", [{"page_number": 1, "text": "A paper title and abstract"}], [])
+
+    visuals = prepare_visuals(pdf_path, extracted, tmp_path / "figures", "paper-1")
+
+    assert visuals == []
+
+
+def test_prepare_visuals_keeps_exact_source_box_separate_from_context_crop(tmp_path):
+    pdf_path = tmp_path / "algorithm.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_text((50, 50), "Page header")
+    page.draw_line((40, 45), (560, 45))
+    source_box = fitz.Rect(300, 440, 550, 730)
+    page.draw_rect(source_box)
+    page.insert_text((315, 470), "Algorithm 1: Iterative procedure")
+    doc.save(pdf_path)
+    doc.close()
+    extracted = ExtractedPaper("Paper", "", [{"page_number": 1, "text": "Algorithm 1: Iterative procedure"}], [])
+
+    visuals = prepare_visuals(pdf_path, extracted, tmp_path / "figures", "paper-1")
+
+    assert len(visuals) == 1
+    assert visuals[0]["rects"] == [[300.0, 440.0, 550.0, 730.0]]
+    assert visuals[0]["bbox_pct"] != visuals[0]["crop_bbox_pct"]
+    assert visuals[0]["bbox_pct"][1] > 50
+
+
+def test_prepare_visuals_provides_actual_crop_and_full_page_fallback(tmp_path):
+    pdf_path = tmp_path / "paper.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=240, height=240)
+    page.insert_text((40, 40), "Figure 1: Benchmark result")
+    page.draw_rect(fitz.Rect(40, 70, 200, 190), color=(0, 0, 0), width=1)
+    doc.save(pdf_path)
+    doc.close()
+    extracted = ExtractedPaper("Paper", "", [{"page_number": 1, "text": "Figure 1: Benchmark result"}], [])
+
+    visuals = prepare_visuals(pdf_path, extracted, tmp_path / "figures", "paper-1")
+
+    assert visuals
+    assert Path(visuals[0]["image_path"]).exists()
+    assert visuals[0]["page_number"] == 1
+    assert visuals[0]["rects"]
+
+
 def test_visual_candidate_pages_uses_text_and_pdf_structure(tmp_path):
     pdf_path = tmp_path / "paper.pdf"
     doc = fitz.open()
@@ -84,127 +113,3 @@ def test_visual_candidate_pages_uses_text_and_pdf_structure(tmp_path):
     candidates = visual_candidate_pages(pdf_path, pages)
 
     assert [page["page_number"] for page in candidates] == [2, 3]
-
-
-def test_analyze_figures_only_calls_vision_for_candidate_pages(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "paper.pdf"
-    doc = fitz.open()
-    doc.new_page(width=240, height=240).insert_text((40, 40), "Plain introduction page")
-    doc.new_page(width=240, height=240).insert_text((40, 40), "Figure 1: Benchmark result")
-    doc.save(pdf_path)
-    doc.close()
-    extracted = ExtractedPaper(
-        "Paper",
-        "",
-        [
-            {"page_number": 1, "text": "Plain introduction page"},
-            {"page_number": 2, "text": "Figure 1: Benchmark result"},
-        ],
-        [],
-    )
-    calls = []
-
-    def fake_analyze_page(page_number, page_text, image_path, provider, api_key=None, model=None, reasoning_effort=None):
-        calls.append(page_number)
-        return {"provider_used": "test", "figures": []}
-
-    monkeypatch.setattr("app.figures.analyze_page_figures", fake_analyze_page)
-
-    result = analyze_figures(pdf_path, extracted, "paper-1", tmp_path / "figures", "codex")
-
-    assert calls == [2]
-    assert result["figures"] == []
-    assert "skipped 1 pages" in result["figure_warnings"][0]
-
-
-def test_analyze_figures_runs_candidate_pages_in_parallel(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "paper.pdf"
-    doc = fitz.open()
-    for index in range(6):
-        doc.new_page(width=240, height=240).insert_text((40, 40), f"Figure {index + 1}: Benchmark result")
-    doc.save(pdf_path)
-    doc.close()
-    extracted = ExtractedPaper(
-        "Paper",
-        "",
-        [
-            {"page_number": index + 1, "text": f"Figure {index + 1}: Benchmark result"}
-            for index in range(6)
-        ],
-        [],
-    )
-    lock = threading.Lock()
-    in_flight = 0
-    max_in_flight = 0
-
-    def fake_analyze_page(page_number, page_text, image_path, provider, api_key=None, model=None, reasoning_effort=None):
-        nonlocal in_flight, max_in_flight
-        with lock:
-            in_flight += 1
-            max_in_flight = max(max_in_flight, in_flight)
-        time.sleep(0.05)
-        with lock:
-            in_flight -= 1
-        return {"provider_used": "test", "figures": []}
-
-    monkeypatch.setenv("FIGURE_ANALYSIS_WORKERS", "8")
-    monkeypatch.setattr("app.figures.analyze_page_figures", fake_analyze_page)
-
-    result = analyze_figures(pdf_path, extracted, "paper-1", tmp_path / "figures", "codex")
-
-    assert result["figures"] == []
-    assert max_in_flight > 1
-    assert max_in_flight <= 5
-
-
-def test_analyze_figures_reports_progress_as_pages_finish(tmp_path, monkeypatch):
-    pdf_path = tmp_path / "paper.pdf"
-    doc = fitz.open()
-    for index in range(2):
-        doc.new_page(width=240, height=240).insert_text((40, 40), f"Figure {index + 1}: Benchmark result")
-    doc.save(pdf_path)
-    doc.close()
-    extracted = ExtractedPaper(
-        "Paper",
-        "",
-        [
-            {"page_number": 1, "text": "Figure 1: Benchmark result"},
-            {"page_number": 2, "text": "Figure 2: Benchmark result"},
-        ],
-        [],
-    )
-    progress = []
-
-    def fake_analyze_page(page_number, page_text, image_path, provider, api_key=None, model=None, reasoning_effort=None):
-        if page_number == 1:
-            time.sleep(0.05)
-        return {
-            "provider_used": "test",
-            "figures": [
-                {
-                    "type": "figure",
-                    "label": f"Figure {page_number}",
-                    "title": f"Result {page_number}",
-                    "bbox_pct": [10, 10, 90, 90],
-                    "explanation": "Shows a result.",
-                    "why_it_matters": "It is evidence.",
-                }
-            ],
-        }
-
-    monkeypatch.setattr("app.figures.analyze_page_figures", fake_analyze_page)
-
-    result = analyze_figures(
-        pdf_path,
-        extracted,
-        "paper-1",
-        tmp_path / "figures",
-        "codex",
-        on_progress=lambda payload: progress.append(payload),
-    )
-
-    figure_counts = [len(payload["figures"]) for payload in progress]
-    assert result["figures"]
-    assert figure_counts[0] == 0
-    assert 1 in figure_counts
-    assert figure_counts[-1] == 2

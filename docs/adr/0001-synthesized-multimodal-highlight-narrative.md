@@ -1,0 +1,3 @@
+# Use one synthesized multimodal Highlight narrative
+
+PaperSprint treats generated Highlights as LLM-synthesized explanations linked to exactly one text or visual source, rather than as quotations that must equal extracted PDF text. One comprehensive multimodal analysis call sees complete paper text and every substantive figure/table as actual pixels, then generates the ordered narrative, source references, and figure interpretations; source-coordinate grounding remains best effort. This deliberately favors a coherent text-and-visual reading product over quotation-shaped Highlights, selectable Reading depth, separate figure interpretation calls, and partial sequences created by discarding unverifiable model wording.

@@ -1,10 +1,10 @@
 Paper: {{title}}
 
-Overview:
-{{overview}}
+Complete Highlight narrative:
+{{highlight_narrative}}
 
-Key takeaways:
-{{key_takeaways}}
+Complete analyzable paper text:
+{{paper_text}}
 
 Relevant paper excerpts:
 {{excerpts}}
