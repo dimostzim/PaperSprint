@@ -996,63 +996,63 @@ h2 {
 
 .label-goal,
 .label-problem {
-  background: color-mix(in srgb, #42b8df 28%, transparent);
+  background: color-mix(in srgb, #2f80ed 28%, transparent);
   color: var(--ink);
 }
 
 .label-solution {
-  background: color-mix(in srgb, #2e9f65 28%, transparent);
+  background: color-mix(in srgb, #219653 28%, transparent);
   color: var(--ink);
 }
 
 .label-method {
-  background: color-mix(in srgb, #63c989 28%, transparent);
+  background: color-mix(in srgb, #00a6a6 28%, transparent);
   color: var(--ink);
 }
 
 .label-benchmarking {
-  background: color-mix(in srgb, #438fd0 28%, transparent);
+  background: color-mix(in srgb, #8d6e63 28%, transparent);
   color: var(--ink);
 }
 
 .label-novelty {
-  background: color-mix(in srgb, #9c82df 28%, transparent);
+  background: color-mix(in srgb, #9b51e0 28%, transparent);
   color: var(--ink);
 }
 
 .label-result {
-  background: color-mix(in srgb, #f4bd32 30%, transparent);
+  background: color-mix(in srgb, #e0a800 30%, transparent);
   color: var(--ink);
 }
 
 .label-ablation {
-  background: color-mix(in srgb, #b98a3f 28%, transparent);
+  background: color-mix(in srgb, #84cc16 28%, transparent);
   color: var(--ink);
 }
 
 .label-hyperparams,
 .label-compute {
-  background: color-mix(in srgb, #71858f 28%, transparent);
+  background: color-mix(in srgb, #64748b 28%, transparent);
   color: var(--ink);
 }
 
 .label-tradeoff {
-  background: color-mix(in srgb, #e88343 28%, transparent);
+  background: color-mix(in srgb, #f97316 28%, transparent);
   color: var(--ink);
 }
 
 .label-limitation {
-  background: color-mix(in srgb, #df7373 28%, transparent);
+  background: color-mix(in srgb, #d946ef 28%, transparent);
   color: var(--ink);
 }
 
 .label-failure {
-  background: color-mix(in srgb, #c74646 30%, transparent);
+  background: color-mix(in srgb, #dc2626 30%, transparent);
   color: var(--ink);
 }
 
 .label-important {
-  background: color-mix(in srgb, #94a0a6 28%, transparent);
+  background: color-mix(in srgb, #94a3b8 28%, transparent);
   color: var(--ink);
 }
 
@@ -1227,52 +1227,52 @@ h2 {
 
 .highlight-rect.label-goal,
 .highlight-rect.label-problem {
-  background: #42b8df;
+  background: #2f80ed;
 }
 
 .highlight-rect.label-solution {
-  background: #2e9f65;
+  background: #219653;
 }
 
 .highlight-rect.label-method {
-  background: #63c989;
+  background: #00a6a6;
 }
 
 .highlight-rect.label-benchmarking {
-  background: #438fd0;
+  background: #8d6e63;
 }
 
 .highlight-rect.label-novelty {
-  background: #9c82df;
+  background: #9b51e0;
 }
 
 .highlight-rect.label-result {
-  background: #f4bd32;
+  background: #e0a800;
 }
 
 .highlight-rect.label-ablation {
-  background: #b98a3f;
+  background: #84cc16;
 }
 
 .highlight-rect.label-hyperparams,
 .highlight-rect.label-compute {
-  background: #71858f;
+  background: #64748b;
 }
 
 .highlight-rect.label-tradeoff {
-  background: #e88343;
+  background: #f97316;
 }
 
 .highlight-rect.label-limitation {
-  background: #df7373;
+  background: #d946ef;
 }
 
 .highlight-rect.label-failure {
-  background: #c74646;
+  background: #dc2626;
 }
 
 .highlight-rect.label-important {
-  background: #94a0a6;
+  background: #94a3b8;
 }
 
 .figure-rect {

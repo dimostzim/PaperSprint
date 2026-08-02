@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -521,6 +522,31 @@ def test_provider_model_options_uses_codex_catalog(monkeypatch):
     monkeypatch.setattr("app.ai.list_codex_models", lambda: ["gpt-5.5", "gpt-5.3-codex-spark"])
 
     assert provider_model_options("codex") == ["gpt-5.5", "gpt-5.3-codex-spark"]
+
+
+def test_default_highlight_palette_separates_similar_categories():
+    source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    start = source.index("const DEFAULT_HIGHLIGHT_COLORS = {")
+    end = source.index("};", start)
+    colors = dict(re.findall(r'^\s+(\w+): "(#[0-9a-fA-F]{6})"', source[start:end], re.MULTILINE))
+
+    def distance(first, second):
+        first_rgb = tuple(int(first[index:index + 2], 16) for index in (1, 3, 5))
+        second_rgb = tuple(int(second[index:index + 2], 16) for index in (1, 3, 5))
+        return sum((left - right) ** 2 for left, right in zip(first_rgb, second_rgb)) ** 0.5
+
+    assert distance(colors["solution"], colors["method"]) > 85
+    assert distance(colors["limitation"], colors["failure"]) > 80
+    core = [colors[facet] for facet in (
+        "problem", "solution", "novelty", "method", "benchmarking", "result",
+        "ablation", "hyperparams", "tradeoff", "limitation", "failure",
+    )]
+    assert min(distance(first, second) for index, first in enumerate(core) for second in core[index + 1:]) > 55
+
+    styles = (Path(__file__).resolve().parents[1] / "static" / "styles.css").read_text(encoding="utf-8").lower()
+    for color in set(core):
+        assert f"background: {color.lower()};" in styles
+        assert f"color-mix(in srgb, {color.lower()}" in styles
 
 
 def test_highlight_category_chips_always_use_overlay_colors():

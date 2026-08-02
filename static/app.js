@@ -26,19 +26,19 @@ const HIGHLIGHT_FACETS = [
 ];
 
 const DEFAULT_HIGHLIGHT_COLORS = {
-  goal: "#42b8df",
-  problem: "#42b8df",
-  solution: "#2e9f65",
-  method: "#63c989",
-  novelty: "#9c82df",
-  benchmarking: "#438fd0",
-  result: "#f4bd32",
-  ablation: "#b98a3f",
-  hyperparams: "#71858f",
-  tradeoff: "#e88343",
-  limitation: "#df7373",
-  failure: "#c74646",
-  important: "#94a0a6",
+  goal: "#2f80ed",
+  problem: "#2f80ed",
+  solution: "#219653",
+  method: "#00a6a6",
+  novelty: "#9b51e0",
+  benchmarking: "#8d6e63",
+  result: "#e0a800",
+  ablation: "#84cc16",
+  hyperparams: "#64748b",
+  tradeoff: "#f97316",
+  limitation: "#d946ef",
+  failure: "#dc2626",
+  important: "#94a3b8",
 };
 
 const HIGHLIGHT_LABEL_ALIASES = {
