@@ -1298,24 +1298,6 @@ h2 {
   outline-color: var(--amber);
 }
 
-.figure-rect span {
-  position: absolute;
-  left: 6px;
-  top: 6px;
-  max-width: calc(100% - 12px);
-  overflow: hidden;
-  border-radius: 999px;
-  padding: 2px 7px;
-  background: var(--strong-surface);
-  color: var(--strong-surface-text);
-  font-size: 10px;
-  font-weight: 800;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
 .citation-rect {
   position: absolute;
   z-index: 3;

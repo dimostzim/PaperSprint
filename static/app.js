@@ -2737,9 +2737,6 @@ function renderPageFigures(overlay, figures, viewport) {
     node.style.width = `${Math.max(14, ((right - left) / 100) * viewport.width)}px`;
     node.style.height = `${Math.max(14, ((bottom - top) / 100) * viewport.height)}px`;
 
-    const label = document.createElement("span");
-    label.textContent = figure.type || "visual";
-    node.appendChild(label);
     node.addEventListener("click", (event) => {
       event.stopPropagation();
       showFigurePopover(figure, node.getBoundingClientRect());
