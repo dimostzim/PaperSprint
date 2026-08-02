@@ -1929,10 +1929,12 @@ h2 {
 }
 
 .highlight-popover {
-  width: min(320px, calc(100vw - 16px));
+  width: min(420px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
   display: grid;
   gap: 8px;
   padding: 10px;
+  overflow-y: auto;
 }
 
 .highlight-popover-copy {

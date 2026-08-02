@@ -3495,7 +3495,7 @@ function copyActiveSelection(event = null) {
 }
 
 function renderHighlightPopover(highlight) {
-  const explanation = briefText(highlight?.text || highlight?.snippet || "");
+  const explanation = String(highlight?.text || highlight?.snippet || "").trim();
   const page = highlight?.page_number ? `p. ${highlight.page_number}` : "unplaced";
   const figure = highlight?.source?.type === "figure"
     ? (state.selectedPaper?.figures || []).find((item) => item.id === highlight.source.visual_id)

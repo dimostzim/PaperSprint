@@ -523,6 +523,21 @@ def test_provider_model_options_uses_codex_catalog(monkeypatch):
     assert provider_model_options("codex") == ["gpt-5.5", "gpt-5.3-codex-spark"]
 
 
+def test_highlight_popover_uses_complete_text_without_truncation():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "static" / "app.js").read_text(encoding="utf-8")
+    start = source.index("function renderHighlightPopover(highlight)")
+    end = source.index("\n\nfunction showHighlightPopover", start)
+    function_source = source[start:end]
+
+    assert "briefText(" not in function_source
+    assert 'highlight?.text || highlight?.snippet || ""' in function_source
+    styles = (root / "static" / "styles.css").read_text(encoding="utf-8")
+    highlight_styles = styles[styles.index(".highlight-popover {"):styles.index(".highlight-popover-copy {")]
+    assert "max-height: calc(100vh - 16px)" in highlight_styles
+    assert "overflow-y: auto" in highlight_styles
+
+
 def test_figure_backed_highlight_offers_visual_attachment_instead_of_text_explanation():
     source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
     start = source.index("function renderHighlightPopover(highlight)")
