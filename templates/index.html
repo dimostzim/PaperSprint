@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=76" />
+    <link rel="stylesheet" href="/static/styles.css?v=90" />
   </head>
   <body class="reader-body">
     <header class="topbar">
@@ -39,23 +39,18 @@
 
       <form id="upload-form" class="upload-form">
         <div class="model-controls">
-          <label class="model-group">
-            <span>Text</span>
-            <select id="text-model-input" class="model-select" aria-label="Text model"></select>
-            <div class="effort-picker">
-              <input id="text-effort-select" type="hidden" value="high" />
-              <button class="effort-select" type="button" data-effort-button aria-haspopup="listbox" aria-expanded="false">high</button>
-              <div class="effort-menu hidden" role="listbox" aria-label="Text reasoning effort"></div>
-            </div>
-          </label>
-          <label class="model-group">
-            <span>Vision</span>
-            <select id="vision-model-input" class="model-select" aria-label="Vision model"></select>
-            <div class="effort-picker">
-              <input id="vision-effort-select" type="hidden" value="high" />
-              <button class="effort-select" type="button" data-effort-button aria-haspopup="listbox" aria-expanded="false">high</button>
-              <div class="effort-menu hidden" role="listbox" aria-label="Vision reasoning effort"></div>
-            </div>
+          <label class="model-group analysis-model-group">
+            <span>
+              Analysis model
+              <span
+                class="model-info"
+                tabindex="0"
+                role="note"
+                aria-label="Analysis always uses high reasoning effort to preserve comprehensive quality."
+                data-tooltip="Analysis always uses high reasoning effort to preserve comprehensive quality."
+              >i</span>
+            </span>
+            <select id="text-model-input" class="model-select" aria-label="Analysis model"></select>
           </label>
         </div>
         <div id="pdf-zoom-controls" class="pdf-controls hidden" role="toolbar" aria-label="PDF zoom">
@@ -111,7 +106,12 @@
             <h2>Highlights</h2>
             <span id="highlight-count">0</span>
           </div>
+          <div id="highlight-filter-status" class="sequence-notice hidden"></div>
           <div id="highlight-filters" class="highlight-filters"></div>
+          <div class="highlight-navigation" aria-label="Highlight sequence navigation">
+            <button id="previous-highlight-button" type="button">Previous</button>
+            <button id="next-highlight-button" type="button">Next</button>
+          </div>
           <div id="highlight-list" class="highlight-list"></div>
         </section>
       </aside>
@@ -124,43 +124,7 @@
         <div id="pdf-viewer" class="pdf-viewer hidden"></div>
       </section>
 
-      <aside class="assistant-panel">
-        <section class="summary-panel">
-          <div class="paper-heading">
-            <span id="paper-provider" class="provider-pill">Idle</span>
-            <h1 id="paper-title">PaperSprint</h1>
-          </div>
-          <p id="paper-overview"></p>
-
-          <div id="background-section" class="summary-subsection hidden">
-            <h2 class="summary-section-title">Background</h2>
-            <div id="background-notes" class="tab-panel"></div>
-          </div>
-        </section>
-
-        <div
-          id="summary-resize-handle"
-          class="panel-resize-handle"
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label="Resize summary"
-          tabindex="0"
-        ></div>
-
-        <section class="takeaways-section">
-          <h2 class="summary-section-title">Takeaways</h2>
-          <div id="takeaways-tab" class="tab-panel takeaways-panel"></div>
-        </section>
-
-        <div
-          id="chat-resize-handle"
-          class="chat-resize-handle"
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label="Resize chat panel"
-          tabindex="0"
-        ></div>
-
+      <aside class="assistant-panel chat-only-panel">
         <section class="chat-panel">
           <div class="chat-header">
             <h2>Chat</h2>
@@ -169,12 +133,13 @@
               <span>Web</span>
             </label>
           </div>
+          <div id="chat-status" class="chat-status">Analyze this paper to start chatting.</div>
           <div id="chat-figure-focus" class="figure-chat-focus hidden"></div>
           <div id="chat-messages" class="chat-messages"></div>
           <form id="chat-form" class="chat-form">
             <textarea id="chat-input" rows="1" placeholder="Ask about this paper"></textarea>
             <button type="submit" data-chat-action="send">Send</button>
-            <button type="submit" data-chat-action="reset-send">Reset &amp; Send</button>
+            <button id="chat-reset-button" type="button">Reset</button>
           </form>
         </section>
       </aside>
@@ -217,6 +182,6 @@
     <div id="citation-popover" class="citation-popover hidden"></div>
     <div id="toast" class="toast hidden"></div>
     <script type="module" src="/static/theme.js?v=14"></script>
-    <script type="module" src="/static/app.js?v=86"></script>
+    <script type="module" src="/static/app.js?v=99"></script>
   </body>
 </html>

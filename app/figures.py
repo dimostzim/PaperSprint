@@ -8,14 +8,14 @@ from typing import Any, Callable
 
 import fitz
 
-from .ai import analyze_page_figures
 from .paper_processing import ExtractedPaper, normalize_text
 
 PAGE_IMAGE_ZOOM = 1.6
 FIGURE_IMAGE_ZOOM = 2.4
 FIGURE_TYPES = {"figure", "table", "plot", "diagram", "screenshot", "equation", "other"}
+VISUAL_PREPARATION_VERSION = 3
 VISUAL_CUE_RE = re.compile(
-    r"\b(?:fig(?:ure)?\.?|tables?|schemes?|diagrams?|plots?)\s*(?:s?\d+|[ivxlcdm]+|[a-z])\b",
+    r"\b(?:fig(?:ure)?\.?|tables?|algorithms?|schemes?|diagrams?|plots?)\s*(?:s?\d+|[ivxlcdm]+|[a-z])\b",
     re.IGNORECASE,
 )
 
@@ -57,6 +57,108 @@ def page_has_pdf_visuals(page: fitz.Page) -> bool:
         if rect and float(rect.width * rect.height) >= page_area * 0.02:
             return True
     return len(drawings) >= 12
+
+
+def _percent_box(rect: fitz.Rect, page_rect: fitz.Rect) -> list[float]:
+    return [
+        round(100 * (rect.x0 - page_rect.x0) / page_rect.width, 2),
+        round(100 * (rect.y0 - page_rect.y0) / page_rect.height, 2),
+        round(100 * (rect.x1 - page_rect.x0) / page_rect.width, 2),
+        round(100 * (rect.y1 - page_rect.y0) / page_rect.height, 2),
+    ]
+
+
+def prepare_visuals(
+    pdf_path: Path,
+    extracted: ExtractedPaper,
+    figures_dir: Path,
+    paper_id: str,
+) -> list[dict[str, Any]]:
+    """Conservatively prepare actual pixels for every substantive visual page."""
+    paper_dir = figure_directory(figures_dir, paper_id)
+    version_file = paper_dir / ".visual-preparation-version"
+    cached_version = version_file.read_text(encoding="utf-8").strip() if version_file.exists() else ""
+    if paper_dir.exists() and cached_version != str(VISUAL_PREPARATION_VERSION):
+        import shutil
+        shutil.rmtree(paper_dir, ignore_errors=True)
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    version_file.write_text(str(VISUAL_PREPARATION_VERSION), encoding="utf-8")
+    page_text = {int(item.get("page_number", 0)): str(item.get("text", "")) for item in extracted.pages}
+    visuals: list[dict[str, Any]] = []
+    doc = fitz.open(pdf_path)
+    try:
+        for page_index, page in enumerate(doc):
+            page_number = page_index + 1
+            cue = page_text_has_visual_cue(page_text.get(page_number, ""))
+            regions: list[fitz.Rect] = []
+            page_area = max(page.rect.width * page.rect.height, 1)
+            for block in page.get_text("dict").get("blocks", []):
+                if block.get("type") == 1 and block.get("bbox"):
+                    rect = fitz.Rect(block["bbox"])
+                    area_ratio = rect.width * rect.height / page_area
+                    in_page_furniture = (rect.y1 <= page.rect.y0 + page.rect.height * 0.08 or rect.y0 >= page.rect.y0 + page.rect.height * 0.92) and area_ratio < 0.05
+                    # Tiny images and small header/footer marks are publisher furniture, not evidence.
+                    if area_ratio >= 0.005 and not in_page_furniture:
+                        regions.append(rect)
+            try:
+                regions.extend(table.bbox for table in page.find_tables().tables)
+            except (AttributeError, RuntimeError, ValueError):
+                pass
+            try:
+                drawing_rects = [fitz.Rect(item["rect"]) for item in page.get_drawings() if item.get("rect")]
+            except RuntimeError:
+                drawing_rects = []
+            content_drawings = [
+                rect
+                for rect in drawing_rects
+                if not (
+                    min(rect.width, rect.height) <= 2
+                    and (rect.y1 <= page.rect.y0 + page.rect.height * 0.08 or rect.y0 >= page.rect.y0 + page.rect.height * 0.92)
+                )
+            ]
+            if content_drawings and cue:
+                union = fitz.Rect(content_drawings[0])
+                for rect in content_drawings[1:]:
+                    union |= rect
+                if union.width * union.height >= page_area * 0.02:
+                    regions.append(union)
+            if not regions:
+                continue
+
+            # Disconnected regions and cue-only pages need the complete page as context.
+            include_full_page = len(regions) != 1 or regions[0] == page.rect
+            for region_index, region in enumerate(regions, start=1):
+                expanded = fitz.Rect(region.x0 - 18, region.y0 - 36, region.x1 + 18, region.y1 + 72) & page.rect
+                visual_id = f"p{page_number}-{region_index}"
+                crop_file = f"{visual_id}.jpg"
+                bbox_pct = _percent_box(region, page.rect)
+                crop_bbox_pct = _percent_box(expanded, page.rect)
+                crop_path = paper_dir / crop_file
+                if not crop_path.exists():
+                    crop_figure_image(pdf_path, page_number, crop_bbox_pct, crop_path)
+                page_file = None
+                if include_full_page:
+                    page_file = f"page-{page_number}.jpg"
+                    page_path = paper_dir / page_file
+                    if not page_path.exists():
+                        render_page_image(pdf_path, page_number, page_path)
+                visuals.append(
+                    {
+                        "id": visual_id,
+                        "preparation_version": VISUAL_PREPARATION_VERSION,
+                        "page_number": page_number,
+                        "bbox_pct": bbox_pct,
+                        "crop_bbox_pct": crop_bbox_pct,
+                        "rects": [[round(value, 2) for value in region]],
+                        "image_file": crop_file,
+                        "image_path": str(paper_dir / crop_file),
+                        "page_image_path": str(paper_dir / page_file) if page_file else None,
+                        "nearby_text": normalize_text(page_text.get(page_number, ""))[:2000],
+                    }
+                )
+    finally:
+        doc.close()
+    return visuals
 
 
 def visual_candidate_pages(pdf_path: Path, pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -171,144 +273,3 @@ def coerce_bbox_pct(value: Any) -> list[float]:
 def sanitize_figure_type(value: Any) -> str:
     normalized = re.sub(r"[^a-z]+", "", str(value).lower())
     return normalized if normalized in FIGURE_TYPES else "other"
-
-
-def normalize_figure_items(payload: dict[str, Any], page_number: int) -> list[dict[str, Any]]:
-    raw_figures = payload.get("figures", [])
-    if not isinstance(raw_figures, list):
-        return []
-
-    figures = []
-    for index, item in enumerate(raw_figures):
-        if not isinstance(item, dict):
-            continue
-
-        title = normalize_text(str(item.get("title", "")))[:180]
-        caption = normalize_text(str(item.get("caption", "")))[:900]
-        explanation = normalize_text(str(item.get("explanation", "")))[:900]
-        why_it_matters = normalize_text(str(item.get("why_it_matters", "")))[:700]
-        if not any([title, caption, explanation, why_it_matters]):
-            continue
-
-        label = normalize_text(str(item.get("label", "")))[:120] or f"Page {page_number} visual {index + 1}"
-        figures.append(
-            {
-                "id": "",
-                "page_number": page_number,
-                "type": sanitize_figure_type(item.get("type", "other")),
-                "label": label,
-                "title": title or label,
-                "bbox_pct": coerce_bbox_pct(item.get("bbox_pct")),
-                "caption": caption,
-                "explanation": explanation,
-                "why_it_matters": why_it_matters,
-                "uncertainty": normalize_text(str(item.get("uncertainty", "")))[:500],
-            }
-        )
-
-    return figures
-
-
-def analyze_figures(
-    pdf_path: Path,
-    extracted: ExtractedPaper,
-    paper_id: str,
-    figures_dir: Path,
-    provider: str | None,
-    api_key: str | None = None,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
-    on_progress: Callable[[dict[str, Any]], None] | None = None,
-) -> dict[str, Any]:
-    paper_dir = figure_directory(figures_dir, paper_id)
-    paper_dir.mkdir(parents=True, exist_ok=True)
-
-    max_pages = int_env("FIGURE_ANALYSIS_MAX_PAGES", 20)
-    max_figures = int_env("FIGURE_ANALYSIS_MAX_FIGURES", 40)
-    max_workers = int_env("FIGURE_ANALYSIS_WORKERS", 5)
-    warnings = []
-    figures = []
-    provider_used = "unknown"
-
-    inspected_pages = extracted.pages[:max_pages]
-    if len(extracted.pages) > max_pages:
-        warnings.append(f"Figure analysis inspected the first {max_pages} pages only.")
-
-    pages = visual_candidate_pages(pdf_path, inspected_pages)
-    skipped_pages = len(inspected_pages) - len(pages)
-    if skipped_pages > 0:
-        warnings.append(f"Figure analysis skipped {skipped_pages} pages without figure/table signals.")
-    if not pages:
-        warnings.append("No pages with figure/table signals were detected.")
-
-    completed_pages = 0
-
-    def progress_payload() -> dict[str, Any]:
-        return {
-            "figures": [dict(figure) for figure in figures],
-            "figure_warnings": list(warnings),
-            "figure_provider_used": provider_used,
-            "figure_analysis_completed_pages": completed_pages,
-            "figure_analysis_total_pages": len(pages),
-        }
-
-    def emit_progress() -> None:
-        if on_progress:
-            on_progress(progress_payload())
-
-    def analyze_candidate_page(page: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        page_number = int(page["page_number"])
-        page_image = paper_dir / f"page-{page_number}.jpg"
-        render_page_image(pdf_path, page_number, page_image)
-        return page_number, analyze_page_figures(
-            page_number,
-            str(page.get("text", "")),
-            page_image,
-            provider,
-            api_key,
-            model,
-            reasoning_effort,
-        )
-
-    emit_progress()
-
-    worker_count = min(max_workers, 5, len(pages))
-    if worker_count > 0:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(analyze_candidate_page, page) for page in pages]
-            for future in as_completed(futures):
-                page_number, payload = future.result()
-                completed_pages += 1
-                if len(figures) >= max_figures:
-                    emit_progress()
-                    continue
-                provider_used = str(payload.get("provider_used", provider_used))
-
-                stopped = False
-                for page_index, figure in enumerate(normalize_figure_items(payload, page_number), start=1):
-                    if len(figures) >= max_figures:
-                        warnings.append(f"Figure analysis stopped after {max_figures} visuals.")
-                        stopped = True
-                        break
-                    figure_id = f"p{page_number}-{page_index}"
-                    image_file = f"{figure_id}.jpg"
-                    crop_figure_image(pdf_path, page_number, figure["bbox_pct"], paper_dir / image_file)
-                    figure["id"] = figure_id
-                    figure["image_file"] = image_file
-                    figures.append(figure)
-                emit_progress()
-                if stopped:
-                    continue
-
-    if len(figures) >= max_figures:
-        seen_warning = f"Figure analysis stopped after {max_figures} visuals."
-        if seen_warning not in warnings:
-            warnings.append(seen_warning)
-
-    return {
-        "figures": figures,
-        "figure_warnings": warnings,
-        "figure_provider_used": provider_used,
-        "figure_analysis_completed_pages": completed_pages,
-        "figure_analysis_total_pages": len(pages),
-    }
