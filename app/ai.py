@@ -626,17 +626,44 @@ def run_openrouter(
     return openrouter_response_text(response.json())
 
 
+def codex_supports_image_attachments(codex_path: str) -> bool:
+    try:
+        result = subprocess.run(
+            [codex_path, "exec", "--help"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "--image" in result.stdout
+
+
+def codex_direct_visual_prompt(prompt: str, image_paths: list[Path]) -> str:
+    visual_paths = "\n".join(f"- {path.resolve()}" for path in image_paths)
+    return (
+        f"{prompt}\n\nOpen and inspect every visual file below directly using your local image-reading tools. "
+        "These files are actual visual evidence; prior text descriptions are not substitutes:\n"
+        f"{visual_paths}"
+    )
+
+
 def run_codex(
     prompt: str,
     timeout_seconds: int | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    image_paths: list[Path] | None = None,
 ) -> str:
     codex_path = shutil.which("codex")
     if not codex_path:
         raise RuntimeError("Codex CLI is not installed or not on PATH.")
 
     prompt = sanitize_prompt_text(prompt)
+    attach_images = bool(image_paths) and codex_supports_image_attachments(codex_path)
+    if image_paths and not attach_images:
+        prompt = codex_direct_visual_prompt(prompt, image_paths)
     timeout = timeout_seconds or int(os.getenv("CODEX_TIMEOUT_SECONDS", "180"))
     selected_model = resolve_text_model(model)
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -660,6 +687,8 @@ def run_codex(
         ]
         if selected_model:
             args[5:5] = ["-m", selected_model]
+        if attach_images:
+            args[-1:-1] = [f"--image={','.join(str(path.resolve()) for path in image_paths or [])}"]
 
         try:
             result = subprocess.run(
@@ -681,6 +710,13 @@ def run_codex(
                 return output
         if result.returncode != 0:
             message = (result.stderr or result.stdout or "Codex failed.").strip()
+            if attach_images and image_paths and "No prompt provided via stdin" in message:
+                return run_codex(
+                    codex_direct_visual_prompt(prompt, image_paths),
+                    timeout_seconds=timeout_seconds,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
             raise RuntimeError(message[:1200])
         return result.stdout.strip()
 
@@ -706,15 +742,15 @@ def run_ai(
             raise RuntimeError("OPENROUTER_API_KEY is not set.")
         return run_openrouter(prompt, system_prompt, expect_json, api_key, model, reasoning_effort, image_paths), "openrouter"
     if selected == "codex":
-        visual_paths = "\n".join(f"- {path.resolve()}" for path in image_paths or [])
         codex_prompt = f"{system_prompt}\n\n{prompt}"
-        if visual_paths:
-            codex_prompt += f"\n\nInspect every visual image at these paths directly:\n{visual_paths}"
+        if image_paths:
+            codex_prompt += "\n\nThe attached images are actual visual evidence. Inspect their pixels directly before answering visual questions."
         return run_codex(
             codex_prompt,
             timeout_seconds=timeout_seconds,
             model=model,
             reasoning_effort=reasoning_effort,
+            image_paths=image_paths,
         ), "codex"
     raise RuntimeError(f"Unknown AI provider: {provider}")
 
@@ -998,7 +1034,7 @@ def build_chat_prompt(
         f"- {item['title']} ({item['url']}): {item.get('snippet', '')}" for item in web_results
     )
     citation_text = format_citation_context(citation_context)
-    figure_text = format_figure_context([*paper.get("figures", []), *(figure_context or [])])
+    figure_text = format_figure_context(figure_context or paper.get("figures", []))
     highlight_narrative = "\n".join(
         f"## {section.get('heading', 'Narrative')}\n" + "\n".join(
             f"- {highlight.get('text', '')}" for highlight in section.get("highlights", [])
@@ -1056,6 +1092,8 @@ def format_figure_context(figure_context: list[dict[str, Any]] | None) -> str:
         uncertainty = normalize_text(str(figure.get("uncertainty", "")))[:400]
 
         parts = [f"Figure {index}: {title}", f"Page: {page_number}"]
+        if figure.get("id"):
+            parts.append(f"Visual image ID: {normalize_text(str(figure['id']))[:120]}")
         if figure_type:
             parts.append(f"Type: {figure_type}")
         if caption:
@@ -1125,13 +1163,23 @@ def answer_chat(
     figure_context: list[dict[str, Any]] | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    figure_image_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
     last_question = next((item["content"] for item in reversed(messages) if item.get("role") == "user"), "")
     excerpts = select_relevant_excerpts(last_question, paper.get("sentences", []))
     selected_provider = choose_provider(provider, api_key)
 
     prompt = build_chat_prompt(paper, messages, excerpts, web_results, citation_context, figure_context)
-    answer, provider_used = run_ai(prompt, CHAT_SYSTEM, selected_provider, False, api_key, model, reasoning_effort)
+    answer, provider_used = run_ai(
+        prompt,
+        CHAT_SYSTEM,
+        selected_provider,
+        False,
+        api_key,
+        model,
+        reasoning_effort,
+        image_paths=figure_image_paths,
+    )
 
     return {
         "answer": answer.strip(),

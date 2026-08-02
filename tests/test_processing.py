@@ -8,6 +8,7 @@ import pytest
 
 from app.ai import (
     DEFAULT_MODEL,
+    answer_chat,
     build_analysis_prompt,
     build_chat_prompt,
     build_selection_explanation_prompt,
@@ -384,13 +385,19 @@ def test_build_chat_prompt_includes_citation_focus():
 
 def test_build_chat_prompt_includes_figure_focus():
     prompt = build_chat_prompt(
-        {"title": "Useful paper", "overview": "The paper studies semantic readers.", "key_takeaways": []},
+        {
+            "title": "Useful paper",
+            "overview": "The paper studies semantic readers.",
+            "key_takeaways": [],
+            "figures": [{"id": "unselected", "label": "Unselected figure", "explanation": "Unrelated visual."}],
+        },
         [{"role": "user", "content": "What does this figure show?"}],
         [],
         [],
         None,
         [
             {
+                "id": "p6-1",
                 "label": "Figure 2",
                 "type": "plot",
                 "page_number": 6,
@@ -404,7 +411,9 @@ def test_build_chat_prompt_includes_figure_focus():
     assert "Figure focus:" in prompt
     assert "Figure 1: Figure 2" in prompt
     assert "Page: 6" in prompt
+    assert "Visual image ID: p6-1" in prompt
     assert "The plot compares error across methods." in prompt
+    assert "Unrelated visual." not in prompt
 
 
 def test_select_relevant_excerpts_by_question_terms():
@@ -514,6 +523,49 @@ def test_provider_model_options_uses_codex_catalog(monkeypatch):
     assert provider_model_options("codex") == ["gpt-5.5", "gpt-5.3-codex-spark"]
 
 
+def test_figure_backed_highlight_offers_visual_attachment_instead_of_text_explanation():
+    source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    start = source.index("function renderHighlightPopover(highlight)")
+    end = source.index("\n\nfunction showHighlightPopover", start)
+    function_source = source[start:end]
+
+    assert "data-add-highlight-figure" in function_source
+    assert "highlight?.source?.type === \"figure\"" in function_source
+
+
+def test_add_figure_to_chat_only_attaches_without_submitting():
+    source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    start = source.index("function addFigureToChat(figure)")
+    end = source.index("\n\nfunction citationsByPage", start)
+    function_source = source[start:end]
+    script = f"""
+const state = {{ selectedFigures: [] }};
+let submissions = 0;
+const els = {{
+  chatInput: {{ value: "my visual question", focus() {{}} }},
+  chatForm: {{ requestSubmit() {{ submissions += 1; }} }},
+}};
+function isFigureSelected(id) {{ return state.selectedFigures.some((figure) => figure.id === id); }}
+function renderChatFigureFocus() {{}}
+function showToast() {{}}
+function sendChatMessage() {{ submissions += 1; }}
+{function_source}
+addFigureToChat({{ id: "p1-1", image_url: "/figure.jpg" }});
+console.log(JSON.stringify({{
+  selectedIds: state.selectedFigures.map((figure) => figure.id),
+  draft: els.chatInput.value,
+  submissions,
+}}));
+"""
+
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    payload = json.loads(result.stdout)
+
+    assert payload == {"selectedIds": ["p1-1"], "draft": "my visual question", "submissions": 0}
+    assert '<img src="${escapeHtml(figure.image_url || "")}"' in source
+    assert "Add figure to chat" in source
+
+
 def test_run_ai_passes_every_visual_to_multimodal_adapter(monkeypatch, tmp_path):
     images = [tmp_path / "one.jpg", tmp_path / "two.jpg"]
     for image in images:
@@ -530,6 +582,110 @@ def test_run_ai_passes_every_visual_to_multimodal_adapter(monkeypatch, tmp_path)
     run_ai("prompt", "system", "openai", True, image_paths=images)
 
     assert captured["images"] == images
+
+
+def test_run_ai_attaches_visuals_to_codex_cli(monkeypatch, tmp_path):
+    images = [tmp_path / "one.jpg", tmp_path / "two.jpg"]
+    for image in images:
+        image.write_bytes(b"jpeg")
+    captured = {}
+
+    def fake_subprocess_run(args, **_kwargs):
+        if args[-2:] == ["exec", "--help"]:
+            return SimpleNamespace(returncode=0, stdout="--image <FILE>", stderr="")
+        captured["args"] = args
+        output_path = Path(args[args.index("-o") + 1])
+        output_path.write_text("visual answer", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.ai.shutil.which", lambda command: "/usr/local/bin/codex" if command == "codex" else None)
+    monkeypatch.setattr("app.ai.subprocess.run", fake_subprocess_run)
+
+    answer, provider = run_ai("What is blue?", "system", "codex", False, image_paths=images)
+
+    assert answer == "visual answer"
+    assert provider == "codex"
+    image_arg = next(argument for argument in captured["args"] if argument.startswith("--image="))
+    assert image_arg.removeprefix("--image=").split(",") == [str(image.resolve()) for image in images]
+    assert "What is blue?" in captured["args"][-1]
+    assert captured["args"][-1] != "-"
+
+
+def test_run_ai_retries_codex_when_image_option_consumes_prompt(monkeypatch, tmp_path):
+    image = tmp_path / "figure.jpg"
+    image.write_bytes(b"jpeg")
+    invocations = []
+
+    def fake_subprocess_run(args, **_kwargs):
+        if args[-2:] == ["exec", "--help"]:
+            return SimpleNamespace(returncode=0, stdout="--image <FILE>", stderr="")
+        invocations.append(args)
+        if any(argument == "--image" or argument.startswith("--image=") for argument in args):
+            return SimpleNamespace(
+                returncode=2,
+                stdout="",
+                stderr="Reading prompt from stdin... No prompt provided via stdin.",
+            )
+        output_path = Path(args[args.index("-o") + 1])
+        output_path.write_text("fallback answer", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.ai.shutil.which", lambda command: "/usr/local/bin/codex" if command == "codex" else None)
+    monkeypatch.setattr("app.ai.subprocess.run", fake_subprocess_run)
+
+    answer, provider = run_ai("Analyze", "system", "codex", False, image_paths=[image])
+
+    assert answer == "fallback answer"
+    assert provider == "codex"
+    assert len(invocations) == 2
+    assert str(image.resolve()) in invocations[1][-1]
+
+
+def test_run_ai_keeps_codex_compatible_when_cli_lacks_image_flag(monkeypatch, tmp_path):
+    image = tmp_path / "figure.jpg"
+    image.write_bytes(b"jpeg")
+    captured = {}
+
+    def fake_subprocess_run(args, **_kwargs):
+        if args[-2:] == ["exec", "--help"]:
+            return SimpleNamespace(returncode=0, stdout="Usage: codex exec [PROMPT]", stderr="")
+        captured["args"] = args
+        output_path = Path(args[args.index("-o") + 1])
+        output_path.write_text("analysis answer", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.ai.shutil.which", lambda command: "/usr/local/bin/codex" if command == "codex" else None)
+    monkeypatch.setattr("app.ai.subprocess.run", fake_subprocess_run)
+
+    answer, provider = run_ai("Analyze", "system", "codex", False, image_paths=[image])
+
+    assert answer == "analysis answer"
+    assert provider == "codex"
+    assert "--image" not in captured["args"]
+    assert str(image.resolve()) in captured["args"][-1]
+
+
+def test_answer_chat_sends_selected_figure_pixels_to_run_ai(monkeypatch, tmp_path):
+    image_path = tmp_path / "selected-figure.jpg"
+    image_path.write_bytes(b"jpeg")
+    captured = {}
+
+    def fake_run_ai(*args, **kwargs):
+        captured["image_paths"] = kwargs.get("image_paths")
+        return "The yellow line is the baseline.", "test"
+
+    monkeypatch.setattr("app.ai.run_ai", fake_run_ai)
+    result = answer_chat(
+        {"title": "Paper", "sentences": [], "figures": []},
+        [{"role": "user", "content": "What is the yellow line?"}],
+        [],
+        "codex",
+        figure_context=[{"id": "p1-1", "label": "Figure 1"}],
+        figure_image_paths=[image_path],
+    )
+
+    assert result["answer"] == "The yellow line is the baseline."
+    assert captured["image_paths"] == [image_path]
 
 
 def test_run_codex_timeout_hides_full_prompt(monkeypatch):

@@ -1121,7 +1121,13 @@ def test_failed_reanalysis_preserves_installed_narrative_and_manual_highlights(t
     assert paper["reanalysis_status"] == "error"
 
 
-def test_chat_passes_figure_context(monkeypatch):
+def test_chat_passes_selected_figure_pixels_to_model(tmp_path, monkeypatch):
+    figures_dir = tmp_path / "figures"
+    figure_dir = main.figure_directory(figures_dir, "paper-1")
+    figure_dir.mkdir(parents=True)
+    figure_image = figure_dir / "p3-1.jpg"
+    figure_image.write_bytes(b"actual figure pixels")
+    monkeypatch.setattr(main, "FIGURES_DIR", figures_dir)
     main.PAPERS.clear()
     main.PAPERS["paper-1"] = {
         "id": "paper-1",
@@ -1131,6 +1137,7 @@ def test_chat_passes_figure_context(monkeypatch):
         "overview": "Paper overview.",
         "key_takeaways": [],
         "sentences": [],
+        "figures": [{"id": "p3-1", "image_file": "p3-1.jpg", "label": "Figure 1", "page_number": 3}],
         "analysis_status": "complete",
     }
     captured = {}
@@ -1145,8 +1152,10 @@ def test_chat_passes_figure_context(monkeypatch):
         figure_context=None,
         model=None,
         reasoning_effort=None,
+        figure_image_paths=None,
     ):
         captured["figure_context"] = figure_context
+        captured["figure_image_paths"] = figure_image_paths
         return {"answer": "ok", "provider_used": "test", "web_results": [], "warnings": []}
 
     monkeypatch.setattr(main, "answer_chat", fake_answer_chat)
@@ -1155,11 +1164,13 @@ def test_chat_passes_figure_context(monkeypatch):
     response = client.post(
         "/api/papers/paper-1/chat",
         json={
-            "messages": [{"role": "user", "content": "What does this figure show?"}],
-            "figure_context": [{"label": "Figure 1", "page_number": 3, "explanation": "A plotted result."}],
+            "messages": [{"role": "user", "content": "What is the yellow line?"}],
+            "figure_context": [{"id": "p3-1", "label": "Figure 1", "page_number": 3}],
         },
     )
 
     assert response.status_code == 200
     assert response.json()["answer"] == "ok"
     assert captured["figure_context"][0]["label"] == "Figure 1"
+    assert captured["figure_image_paths"] == [figure_image]
+    assert captured["figure_image_paths"][0].read_bytes() == b"actual figure pixels"

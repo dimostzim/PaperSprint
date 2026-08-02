@@ -1667,6 +1667,15 @@ h2 {
   font-weight: 700;
 }
 
+.figure-focus-chip img {
+  width: 52px;
+  height: 52px;
+  flex: 0 0 auto;
+  border-radius: 5px;
+  object-fit: cover;
+  background: var(--paper);
+}
+
 .figure-focus-chip span {
   min-width: 0;
   overflow: hidden;

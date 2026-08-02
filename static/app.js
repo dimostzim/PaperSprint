@@ -1017,7 +1017,7 @@ function renderPaperDetails(paper) {
       : paper.analysis_status === "analyzing"
         ? paper.analysis_stage || "Analysis in progress."
         : paper.analysis_status === "error"
-          ? "Analysis failed. Reanalyze to start chatting."
+          ? `Analysis failed: ${paper.analysis_error || "Unknown provider error."} Reanalyze to start chatting.`
           : "Analyze this paper to start chatting.";
     els.chatStatus.classList.toggle("hidden", chatAvailable);
   }
@@ -2139,6 +2139,7 @@ function renderChatFigureFocus() {
     state.selectedFigures
       .map((figure) => `
         <span class="figure-focus-chip">
+          <img src="${escapeHtml(figure.image_url || "")}" alt="" />
           <span>${escapeHtml(figureTitle(figure))}</span>
           <button data-remove-chat-figure="${escapeHtml(figure.id)}" type="button" aria-label="Remove figure">×</button>
         </span>
@@ -3496,6 +3497,9 @@ function copyActiveSelection(event = null) {
 function renderHighlightPopover(highlight) {
   const explanation = briefText(highlight?.text || highlight?.snippet || "");
   const page = highlight?.page_number ? `p. ${highlight.page_number}` : "unplaced";
+  const figure = highlight?.source?.type === "figure"
+    ? (state.selectedPaper?.figures || []).find((item) => item.id === highlight.source.visual_id)
+    : null;
   setHtml(
     els.highlightPopover,
     `
@@ -3508,7 +3512,9 @@ function renderHighlightPopover(highlight) {
         <p>${escapeHtml(explanation || "No explanation available yet.")}</p>
       </div>
       <div class="popover-actions">
-        <button data-explain-highlight type="button">Explain in chat</button>
+        ${figure
+          ? '<button data-add-highlight-figure type="button">Add figure to chat</button>'
+          : '<button data-explain-highlight type="button">Explain in chat</button>'}
         ${highlight?.origin === "manual" ? '<button data-remove-highlight type="button">Remove</button>' : ''}
       </div>
     `,
@@ -3571,7 +3577,7 @@ function renderFigurePopover(figure) {
         ${figureTextBlock("Big picture", figure?.why_it_matters)}
         ${figureTextBlock("What it shows / results", figure?.explanation)}
       </div>
-      <button data-add-active-figure type="button">Add to chat</button>
+      <button data-add-active-figure type="button">Add figure to chat</button>
     `,
   );
 }
@@ -4079,6 +4085,13 @@ window.addEventListener("pointerup", finishFigurePopoverDrag);
 
 els.highlightPopover?.addEventListener("click", (event) => {
   if (event.target.closest?.("[data-close-highlight]")) {
+    hideHighlightPopover();
+    return;
+  }
+  if (event.target.closest?.("[data-add-highlight-figure]")) {
+    const highlight = (state.selectedPaper?.overlay_highlights || state.selectedPaper?.highlights || [])[state.activeHighlightIndex];
+    const figure = (state.selectedPaper?.figures || []).find((item) => item.id === highlight?.source?.visual_id);
+    addFigureToChat(figure);
     hideHighlightPopover();
     return;
   }

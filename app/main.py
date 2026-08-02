@@ -353,6 +353,44 @@ def public_figures(paper_id: str, figures: list[dict[str, Any]]) -> list[dict[st
     return public_items
 
 
+def selected_figure_image_paths(
+    paper_id: str,
+    paper: dict[str, Any],
+    figure_context: list[dict[str, Any]] | None,
+) -> list[Path]:
+    selected_ids = list(dict.fromkeys(
+        str(item.get("id", "")).strip()
+        for item in figure_context or []
+        if str(item.get("id", "")).strip()
+    ))
+    if not selected_ids:
+        return []
+
+    figures_by_id = {str(item.get("id")): item for item in paper.get("figures", []) if item.get("id")}
+    unknown_ids = [figure_id for figure_id in selected_ids if figure_id not in figures_by_id]
+    if unknown_ids:
+        raise HTTPException(status_code=400, detail="Selected figure is no longer available.")
+
+    paper_dir = figure_directory(FIGURES_DIR, paper_id)
+    paths: list[Path] = []
+    for figure_id in selected_ids:
+        figure = figures_by_id[figure_id]
+        image_file = Path(str(figure.get("image_file", ""))).name
+        image_path = paper_dir / image_file
+        if not image_file or not image_path.exists():
+            ensure_figure_images(paper_pdf_path(paper), FIGURES_DIR, paper_id, [figure])
+        if not image_file or not image_path.exists():
+            raise HTTPException(status_code=409, detail="Selected figure image is unavailable.")
+        paths.append(image_path)
+
+        page_image_file = Path(str(figure.get("page_image_path", ""))).name
+        page_image_path = paper_dir / page_image_file
+        if page_image_file and page_image_path.exists():
+            paths.append(page_image_path)
+
+    return list(dict.fromkeys(paths))
+
+
 def figure_analysis_response(paper_id: str, paper: dict[str, Any]) -> dict[str, Any]:
     return {
         "figures": public_figures(paper_id, paper.get("figures", [])),
@@ -946,6 +984,7 @@ async def chat_with_paper(paper_id: str, request: ChatRequest):
         except Exception as error:
             web_results = [{"title": "Web search failed", "url": "", "snippet": str(error)}]
 
+    figure_image_paths = selected_figure_image_paths(paper_id, paper, request.figure_context)
     try:
         return await asyncio.to_thread(
             answer_chat,
@@ -958,6 +997,7 @@ async def chat_with_paper(paper_id: str, request: ChatRequest):
             request.figure_context,
             paper.get("analysis_model") or request.model,
             "high",
+            figure_image_paths,
         )
     except Exception as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
