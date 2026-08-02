@@ -535,13 +535,18 @@ def test_default_highlight_palette_separates_similar_categories():
         second_rgb = tuple(int(second[index:index + 2], 16) for index in (1, 3, 5))
         return sum((left - right) ** 2 for left, right in zip(first_rgb, second_rgb)) ** 0.5
 
-    assert distance(colors["solution"], colors["method"]) > 85
-    assert distance(colors["limitation"], colors["failure"]) > 80
+    def blended_distance(first, second):
+        return distance(first, second) * 0.32
+
+    assert blended_distance(colors["problem"], colors["solution"]) > 55
+    assert blended_distance(colors["problem"], colors["method"]) > 55
+    assert blended_distance(colors["solution"], colors["method"]) > 55
+    assert blended_distance(colors["limitation"], colors["failure"]) > 50
     core = [colors[facet] for facet in (
         "problem", "solution", "novelty", "method", "benchmarking", "result",
         "ablation", "hyperparams", "tradeoff", "limitation", "failure",
     )]
-    assert min(distance(first, second) for index, first in enumerate(core) for second in core[index + 1:]) > 55
+    assert min(blended_distance(first, second) for index, first in enumerate(core) for second in core[index + 1:]) > 25
 
     styles = (Path(__file__).resolve().parents[1] / "static" / "styles.css").read_text(encoding="utf-8").lower()
     for color in set(core):
