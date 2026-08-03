@@ -632,8 +632,10 @@ button:disabled {
 }
 
 .library-panel {
+  display: flex;
+  flex-direction: column;
   border-right: 1px solid var(--line);
-  overflow: auto;
+  overflow: hidden;
 }
 
 .assistant-panel {
@@ -772,8 +774,12 @@ h2 {
 }
 
 .highlight-list {
+  min-height: 0;
   display: grid;
+  flex: 1 1 auto;
   gap: 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 0 12px 14px;
 }
 
@@ -799,9 +805,12 @@ h2 {
 
 .highlight-navigation {
   display: grid;
+  flex: 0 0 auto;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
-  padding: 0 12px 10px;
+  border-top: 1px solid var(--line);
+  padding: 10px 12px 12px;
+  background: var(--panel);
 }
 
 .narrative-heading {
@@ -993,6 +1002,11 @@ h2 {
 }
 
 .highlights-section {
+  min-height: 0;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
   border-top: 1px solid var(--line);
 }
 
