@@ -766,6 +766,7 @@ h2 {
 
 .paper-list {
   display: grid;
+  flex: 0 0 auto;
   gap: 5px;
   max-height: 190px;
   overflow-y: auto;

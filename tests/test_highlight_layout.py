@@ -23,6 +23,7 @@ def test_highlight_navigation_stays_fixed_below_independently_scrolling_story():
 
     assert navigation_position > list_position
     assert "overflow: hidden" in css_rule(styles, ".library-panel")
+    assert "flex: 0 0 auto" in css_rule(styles, ".paper-list")
     assert "display: flex" in css_rule(styles, ".highlights-section")
     assert "min-height: 0" in css_rule(styles, ".highlights-section")
     assert "overflow: hidden" in css_rule(styles, ".highlights-section")
