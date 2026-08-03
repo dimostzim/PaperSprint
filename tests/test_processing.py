@@ -654,23 +654,32 @@ console.log(JSON.stringify({{ ...state, draft: els.chatInput.value, submissions 
     }
 
 
-def test_highlight_selection_only_adds_an_outline():
+def test_highlight_selection_only_adds_a_strong_outline():
     styles = (Path(__file__).resolve().parents[1] / "static" / "styles.css").read_text(encoding="utf-8")
     active_start = styles.index(".highlight-rect.active {")
     active_end = styles.index("}\n", active_start)
     active_rule = styles[active_start:active_end]
 
     assert "opacity:" not in active_rule
+    assert "box-shadow:" not in active_rule
     assert ".overlay-layer:has(.highlight-rect.active) .highlight-rect:not(.active)" not in styles
     assert ".highlight-rect:hover" not in styles
-    assert "outline: 2px solid var(--accent-strong)" in active_rule
+    assert "outline: 3px solid var(--accent-strong)" in active_rule
+
+
+def test_source_unavailable_highlight_flash_respects_reduced_motion():
+    styles = (Path(__file__).resolve().parents[1] / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert ".highlight-card.source-unavailable-flash" in styles
+    assert "animation: source-unavailable-flash 700ms" in styles
+    assert "@media (prefers-reduced-motion: reduce)" in styles
 
 
 def test_highlight_popover_uses_complete_text_without_truncation():
     root = Path(__file__).resolve().parents[1]
     source = (root / "static" / "app.js").read_text(encoding="utf-8")
     start = source.index("function renderHighlightPopover(highlight)")
-    end = source.index("\n\nfunction showHighlightPopover", start)
+    end = source.index("\n\nfunction openHighlightPopover", start)
     function_source = source[start:end]
 
     assert "briefText(" not in function_source
@@ -684,7 +693,7 @@ def test_highlight_popover_uses_complete_text_without_truncation():
 def test_figure_backed_highlight_offers_visual_attachment_instead_of_text_explanation():
     source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
     start = source.index("function renderHighlightPopover(highlight)")
-    end = source.index("\n\nfunction showHighlightPopover", start)
+    end = source.index("\n\nfunction openHighlightPopover", start)
     function_source = source[start:end]
 
     assert "data-add-highlight-figure" in function_source

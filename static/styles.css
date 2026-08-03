@@ -925,6 +925,27 @@ h2 {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+.highlight-card.source-unavailable-flash {
+  animation: source-unavailable-flash 700ms ease-out;
+}
+
+@keyframes source-unavailable-flash {
+  0%, 100% {
+    border-color: var(--accent);
+    background: var(--panel);
+  }
+  45% {
+    border-color: var(--accent-strong);
+    background: var(--facet-bg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .highlight-card.source-unavailable-flash {
+    animation: none;
+  }
+}
+
 .paper-card strong {
   overflow: hidden;
   font-size: 12px;
@@ -1226,8 +1247,7 @@ h2 {
 
 .highlight-rect.active {
   z-index: 4;
-  outline: 2px solid var(--accent-strong);
-  box-shadow: 0 0 0 1px var(--panel);
+  outline: 3px solid var(--accent-strong);
 }
 
 .highlight-rect.label-goal,

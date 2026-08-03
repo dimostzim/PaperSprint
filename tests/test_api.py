@@ -460,6 +460,36 @@ def test_upload_uses_cached_completed_analysis(tmp_path, monkeypatch):
     assert (papers_dir / f"{digest[:12]}-paper.pdf").exists()
 
 
+def test_public_paper_keeps_figure_bbox_source_navigable():
+    payload = main.public_paper(
+        {
+            "id": "paper-1",
+            "filename": "paper.pdf",
+            "title": "Paper",
+            "narrative_sections": [
+                {
+                    "heading": "Results",
+                    "highlights": [
+                        {
+                            "id": "figure-result",
+                            "text": "The chart shows the main result.",
+                            "label": "result",
+                            "page_number": 2,
+                            "rects": [],
+                            "source": {"type": "figure", "bbox_pct": [10, 20, 60, 80]},
+                        }
+                    ],
+                }
+            ],
+            "figures": [],
+            "citations": [],
+        },
+        include_details=True,
+    )
+
+    assert payload["highlights"][0]["navigation_available"] is True
+
+
 def test_public_paper_counts_only_citations_with_contexts():
     payload = main.public_paper(
         {

@@ -2,6 +2,10 @@ import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168
 import DOMPurify from "https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.es.mjs";
 import { marked } from "https://cdn.jsdelivr.net/npm/marked@15.0.12/lib/marked.esm.js";
 import { linkifyChatPageReferences } from "./chat_references.js";
+import {
+  createHighlightNavigationController,
+  highlightSourceRects,
+} from "./highlight-navigation.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
@@ -976,6 +980,7 @@ function clearSelectedPaper() {
   hideCitationPopover();
   hideFigurePopover();
   hideHighlightPopover();
+  clearActiveHighlight();
   if (state.analysisPoll) {
     window.clearTimeout(state.analysisPoll);
     state.analysisPoll = null;
@@ -2320,12 +2325,33 @@ function selectHighlight(highlightIndex) {
   els.pdfViewer?.querySelectorAll(".highlight-rect").forEach((node) => node.classList.remove("active"));
   const card = els.highlightList?.querySelector(`[data-highlight-index="${highlightIndex}"]`);
   if (card) {
+    const behavior = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+      ? "auto"
+      : "smooth";
     card.classList.add("active");
-    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    card.scrollIntoView({ behavior, block: "center" });
   }
   els.pdfViewer?.querySelectorAll(`[data-highlight-index="${highlightIndex}"]`).forEach((node) => {
     node.classList.add("active");
   });
+}
+
+function clearActiveHighlight() {
+  state.activeHighlightIndex = null;
+  els.highlightList?.querySelectorAll(".highlight-card").forEach((node) => node.classList.remove("active"));
+  els.pdfViewer?.querySelectorAll(".highlight-rect").forEach((node) => node.classList.remove("active"));
+  syncHighlightNavigation();
+}
+
+function flashUnavailableHighlight(highlightIndex) {
+  const card = els.highlightList?.querySelector(`[data-highlight-index="${highlightIndex}"]`);
+  if (!card) {
+    return;
+  }
+  card.classList.remove("source-unavailable-flash");
+  void card.offsetWidth;
+  card.classList.add("source-unavailable-flash");
+  window.setTimeout(() => card.classList.remove("source-unavailable-flash"), 700);
 }
 
 function setHighlightHover(highlightIndex, isHovered) {
@@ -2334,58 +2360,15 @@ function setHighlightHover(highlightIndex, isHovered) {
   });
 }
 
-function jumpToHighlight(highlightIndex) {
-  const highlight = (state.selectedPaper?.highlights || [])[highlightIndex];
-  if (!highlight) {
-    return;
-  }
-  selectHighlight(highlightIndex);
-  syncHighlightNavigation();
-  if (!highlight.navigation_available) {
-    showToast("Source location unavailable for this verified passage");
-    return;
-  }
-  const rect = els.pdfViewer?.querySelector(`[data-highlight-index="${highlightIndex}"]`);
-  if (rect) {
-    scrollReaderNodeIntoView(rect);
-    return;
-  }
-  if (highlight.page_number) {
-    jumpToPage(highlight.page_number);
-  }
-}
-
 function visibleHighlightIndexes() {
   return filteredHighlights(state.selectedPaper?.highlights || []).map((highlight) => highlight.highlightIndex);
 }
 
-function syncHighlightNavigation() {
-  const indexes = visibleHighlightIndexes();
-  const position = indexes.indexOf(state.activeHighlightIndex);
-  if (els.previousHighlightButton) {
-    els.previousHighlightButton.disabled = !indexes.length || position <= 0;
-  }
-  if (els.nextHighlightButton) {
-    els.nextHighlightButton.disabled = !indexes.length || position === indexes.length - 1;
-  }
-}
-
-function stepHighlight(delta) {
-  const indexes = visibleHighlightIndexes();
-  if (!indexes.length) return;
-  const position = indexes.indexOf(state.activeHighlightIndex);
-  const nextPosition = position < 0
-    ? (delta > 0 ? 0 : indexes.length - 1)
-    : Math.max(0, Math.min(indexes.length - 1, position + delta));
-  jumpToHighlight(indexes[nextPosition]);
-}
-
-function scrollReaderNodeIntoView(node, block = "center") {
-  if (!node || !els.readerPanel) {
+function scrollReaderRectIntoView(nodeRect, block = "center") {
+  if (!nodeRect || !els.readerPanel) {
     return;
   }
 
-  const nodeRect = node.getBoundingClientRect();
   const panelRect = els.readerPanel.getBoundingClientRect();
   const top = nodeRect.top - panelRect.top + els.readerPanel.scrollTop;
   const left = nodeRect.left - panelRect.left + els.readerPanel.scrollLeft;
@@ -2395,6 +2378,55 @@ function scrollReaderNodeIntoView(node, block = "center") {
   const targetLeft = left - (els.readerPanel.clientWidth - nodeRect.width) / 2;
   els.readerPanel.scrollTop = Math.max(0, targetTop);
   els.readerPanel.scrollLeft = Math.max(0, targetLeft);
+}
+
+function scrollReaderNodeIntoView(node, block = "center") {
+  scrollReaderRectIntoView(node?.getBoundingClientRect(), block);
+}
+
+const highlightNavigationController = createHighlightNavigationController({
+  getHighlight: (highlightIndex) => (
+    state.selectedPaper?.overlay_highlights
+    || state.selectedPaper?.highlights
+    || []
+  )[highlightIndex],
+  getVisibleHighlightIndexes: visibleHighlightIndexes,
+  getActiveHighlightIndex: () => state.activeHighlightIndex,
+  getSourceNodes: (highlightIndex) => (
+    els.pdfViewer?.querySelectorAll(`[data-highlight-index="${highlightIndex}"]`) || []
+  ),
+  selectHighlight,
+  closeCompetingPopovers: () => {
+    window.getSelection()?.removeAllRanges();
+    hideSelectionPopover();
+    hideCitationPopover();
+    hideFigurePopover();
+  },
+  centerSource: (rect) => scrollReaderRectIntoView(rect),
+  openHighlightPopover,
+  hideHighlightPopover,
+  flashUnavailableHighlight,
+  notifySourceUnavailable: () => showToast("Source location unavailable for this Highlight"),
+  updateButtons: ({ previousDisabled, nextDisabled }) => {
+    if (els.previousHighlightButton) {
+      els.previousHighlightButton.disabled = previousDisabled;
+    }
+    if (els.nextHighlightButton) {
+      els.nextHighlightButton.disabled = nextDisabled;
+    }
+  },
+});
+
+function jumpToHighlight(highlightIndex) {
+  highlightNavigationController.activate(highlightIndex);
+}
+
+function syncHighlightNavigation() {
+  highlightNavigationController.syncButtons();
+}
+
+function stepHighlight(delta) {
+  highlightNavigationController.step(delta);
 }
 
 function jumpToEvidenceTarget(target) {
@@ -2515,7 +2547,8 @@ function jumpToChatPageReference(pageNumber) {
 function highlightsByPage(highlights) {
   const map = new Map();
   for (const [index, highlight] of (highlights || []).entries()) {
-    if (!highlight.page_number || !highlight.rects?.length) {
+    const hasSourceArea = highlight.rects?.length || highlight.source?.bbox_pct?.length === 4;
+    if (!highlight.page_number || !hasSourceArea) {
       continue;
     }
     const pageHighlights = map.get(highlight.page_number) || [];
@@ -2548,6 +2581,7 @@ async function renderPdf(paper, options = {}) {
   hideCitationPopover();
   hideFigurePopover();
   hideHighlightPopover();
+  clearActiveHighlight();
   els.readerEmpty?.classList.add("hidden");
   els.pdfViewer?.classList.remove("hidden");
   setHtml(els.pdfViewer, `<div class="loading">Rendering PDF</div>`);
@@ -2744,7 +2778,7 @@ function renderPageHighlights(overlay, highlights, pageSize, viewport) {
   for (const highlight of highlights) {
     const labelId = highlightLabelId(highlight.label);
     const color = highlightColor(highlight);
-    for (const rect of highlight.rects || []) {
+    for (const rect of highlightSourceRects(highlight, pageSize)) {
       const [x0, y0, x1, y1] = rect;
       const node = document.createElement("div");
       node.className = `highlight-rect label-${labelId}`;
@@ -2763,7 +2797,7 @@ function renderPageHighlights(overlay, highlights, pageSize, viewport) {
           delete node.dataset.suppressClick;
           return;
         }
-        showHighlightPopover(highlight.highlightIndex, node.getBoundingClientRect());
+        jumpToHighlight(highlight.highlightIndex);
       });
       node.addEventListener("mouseenter", () => {
         setHighlightHover(highlight.highlightIndex, true);
@@ -3454,6 +3488,7 @@ function startTextSelection(event) {
   hideCitationPopover();
   hideFigurePopover();
   hideHighlightPopover();
+  clearActiveHighlight();
   event.preventDefault();
 }
 
@@ -3550,6 +3585,7 @@ function showSelectionPopoverFor(selection) {
   hideCitationPopover();
   hideFigurePopover();
   hideHighlightPopover();
+  clearActiveHighlight();
 
   state.activeSelection = {
     text: selection.text,
@@ -3642,8 +3678,8 @@ function renderHighlightPopover(highlight) {
   );
 }
 
-function showHighlightPopover(highlightIndex, rect) {
-  if (!state.selectedPaper || !els.highlightPopover) {
+function openHighlightPopover(highlightIndex, rect) {
+  if (!state.selectedPaper || !els.highlightPopover || !rect) {
     return;
   }
 
@@ -3653,14 +3689,7 @@ function showHighlightPopover(highlightIndex, rect) {
     return;
   }
 
-  window.getSelection()?.removeAllRanges();
-  hideSelectionPopover();
-  hideCitationPopover();
-  hideFigurePopover();
-  state.activeHighlightIndex = highlightIndex;
-  selectHighlight(highlightIndex);
   renderHighlightPopover(highlight);
-
   const popover = els.highlightPopover;
   popover.classList.remove("hidden");
   const top = Math.max(8, rect.top - popover.offsetHeight - 8);
@@ -3673,9 +3702,6 @@ function showHighlightPopover(highlightIndex, rect) {
 }
 
 function hideHighlightPopover() {
-  state.activeHighlightIndex = null;
-  els.highlightList?.querySelectorAll(".highlight-card").forEach((node) => node.classList.remove("active"));
-  els.pdfViewer?.querySelectorAll(".highlight-rect").forEach((node) => node.classList.remove("active"));
   els.highlightPopover?.classList.add("hidden");
 }
 
@@ -3718,6 +3744,7 @@ function showFigurePopover(figure, rect) {
   hideSelectionPopover();
   hideCitationPopover();
   hideHighlightPopover();
+  clearActiveHighlight();
   state.activeFigure = figure;
   selectFigure(figure.id || "");
   renderFigurePopover(figure);
@@ -3809,6 +3836,7 @@ function showCitationPopover(citation, rect) {
   hideSelectionPopover();
   hideFigurePopover();
   hideHighlightPopover();
+  clearActiveHighlight();
   state.activeCitation = citation;
   renderCitationPopover(citation);
   const popover = els.citationPopover;
@@ -3934,6 +3962,7 @@ async function removeActiveHighlight() {
     return;
   }
   hideHighlightPopover();
+  clearActiveHighlight();
   const source = highlight.origin === "manual" ? "manual" : "generated";
   const paper = await requestJson(`/api/papers/${state.selectedPaper.id}/highlights/${encodeURIComponent(highlight.id)}?source=${source}`, { method: "DELETE" });
   applySelectedPaperUpdate(paper);
@@ -4193,8 +4222,11 @@ document.addEventListener("mousedown", (event) => {
   if (!els.figurePopover?.contains(event.target) && !event.target.closest?.(".figure-rect")) {
     hideFigurePopover();
   }
-  if (!els.highlightPopover?.contains(event.target) && !event.target.closest?.(".highlight-rect")) {
-    hideHighlightPopover();
+  const highlightActivator = event.target.closest?.(
+    ".highlight-rect, .highlight-card, #previous-highlight-button, #next-highlight-button",
+  );
+  if (!els.highlightPopover?.contains(event.target) && !highlightActivator) {
+    highlightNavigationController.closePopover();
   }
 });
 
@@ -4216,7 +4248,7 @@ window.addEventListener("pointerup", finishFigurePopoverDrag);
 
 els.highlightPopover?.addEventListener("click", (event) => {
   if (event.target.closest?.("[data-close-highlight]")) {
-    hideHighlightPopover();
+    highlightNavigationController.closePopover();
     return;
   }
   if (event.target.closest?.("[data-add-highlight-figure]")) {

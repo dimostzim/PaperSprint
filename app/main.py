@@ -486,13 +486,17 @@ def flatten_highlight_sequence(paper: dict[str, Any]) -> list[dict[str, Any]]:
     narrative_index = 0
     for section_index, section in enumerate(paper.get("narrative_sections", [])):
         for highlight in section.get("highlights", []):
+            source = highlight.get("source") if isinstance(highlight.get("source"), dict) else {}
             flattened.append(
                 {
                     **highlight,
                     "origin": "generated",
                     "section_index": section_index,
                     "narrative_index": narrative_index,
-                    "navigation_available": bool(highlight.get("page_number") and highlight.get("rects")),
+                    "navigation_available": bool(
+                        highlight.get("page_number")
+                        and (highlight.get("rects") or source.get("bbox_pct"))
+                    ),
                 }
             )
             narrative_index += 1
