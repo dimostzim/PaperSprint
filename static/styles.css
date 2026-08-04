@@ -1260,6 +1260,10 @@ h2 {
   cursor: pointer;
 }
 
+.highlight-rect.figure-source {
+  opacity: 0.05;
+}
+
 .highlight-rect.active {
   z-index: 4;
   outline: 3px solid var(--accent-strong);

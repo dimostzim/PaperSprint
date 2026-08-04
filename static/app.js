@@ -2781,7 +2781,8 @@ function renderPageHighlights(overlay, highlights, pageSize, viewport) {
     for (const rect of highlightSourceRects(highlight, pageSize)) {
       const [x0, y0, x1, y1] = rect;
       const node = document.createElement("div");
-      node.className = `highlight-rect label-${labelId}`;
+      const sourceTypeClass = highlight.source?.type === "figure" ? " figure-source" : "";
+      node.className = `highlight-rect label-${labelId}${sourceTypeClass}`;
       node.title = `${highlightLabelText(highlight.label)}: ${highlight.text || highlight.snippet || ""}`;
       node.dataset.highlightIndex = String(highlight.highlightIndex);
       if (safeHexColor(highlight.color) && color) {
