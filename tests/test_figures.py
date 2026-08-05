@@ -76,6 +76,26 @@ def test_prepare_visuals_does_not_promote_text_page_with_figure_reference_to_ful
     assert visuals == []
 
 
+def test_prepare_visuals_accepts_tuple_table_bounding_boxes(tmp_path):
+    pdf_path = tmp_path / "table.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=300)
+    for x in (40, 150, 260):
+        page.draw_line((x, 80), (x, 220))
+    for y in (80, 120, 170, 220):
+        page.draw_line((40, y), (260, y))
+    for y, text in ((105, "A"), (145, "B"), (195, "C")):
+        page.insert_text((60, y), text)
+    doc.save(pdf_path)
+    doc.close()
+    extracted = ExtractedPaper("Paper", "", [{"page_number": 1, "text": "Table 1"}], [])
+
+    visuals = prepare_visuals(pdf_path, extracted, tmp_path / "figures", "paper-1")
+
+    assert visuals
+    assert visuals[0]["bbox_pct"] == [13.33, 26.67, 86.67, 73.33]
+
+
 def test_prepare_visuals_keeps_exact_source_box_separate_from_context_crop(tmp_path):
     pdf_path = tmp_path / "algorithm.pdf"
     doc = fitz.open()
