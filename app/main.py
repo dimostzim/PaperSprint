@@ -19,9 +19,7 @@ from starlette.requests import Request
 
 from .ai import (
     ANALYSIS_VERSION,
-    ModelCapacityError,
     analyze_paper,
-    build_analysis_prompt,
     answer_chat,
     answer_selection_explanation,
     provider_model_options,
@@ -29,7 +27,6 @@ from .ai import (
     resolve_text_model,
     model_capacity_tokens,
     model_supports_multimodal,
-    validate_analysis_capacity,
     validate_citations,
 )
 from .citations import CITATION_VERSION, citation_has_context, extract_citations, ground_citation_rects
@@ -829,27 +826,8 @@ async def analyze_uploaded_paper(paper_id: str, request: AnalysisRequest):
     ):
         return public_paper(paper, include_details=True)
 
-    try:
-        extracted = await asyncio.to_thread(extract_pdf, pdf_path)
-        visuals = await asyncio.to_thread(prepare_visuals, pdf_path, extracted, FIGURES_DIR, paper_id)
-        image_paths = list(dict.fromkeys(
-            Path(path)
-            for item in visuals
-            for path in (item.get("image_path"), item.get("page_image_path"))
-            if path
-        ))
-        validate_analysis_capacity(build_analysis_prompt(extracted, visuals), request.model, image_paths)
-    except ModelCapacityError as error:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "model_capacity_exceeded",
-                "message": str(error),
-                "model": error.model,
-                "required_tokens": error.required_tokens,
-                "capacity_tokens": error.capacity_tokens,
-            },
-        ) from error
+    extracted = await asyncio.to_thread(extract_pdf, pdf_path)
+    visuals = await asyncio.to_thread(prepare_visuals, pdf_path, extracted, FIGURES_DIR, paper_id)
 
     is_reanalysis = paper.get("analysis_status") == "complete"
     if is_reanalysis:

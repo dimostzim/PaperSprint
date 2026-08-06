@@ -9,6 +9,7 @@ import pytest
 
 from app.ai import (
     DEFAULT_MODEL,
+    analyze_paper,
     answer_chat,
     build_analysis_prompt,
     build_chat_prompt,
@@ -286,6 +287,45 @@ def test_normalize_analysis_does_not_cap_highlights():
     assert highlights[0]["id"] == "h1"
     assert highlights[0]["text"] == "Synthesized point 0"
     assert "key_takeaways" not in analysis
+
+
+def test_analyze_paper_defers_capacity_validation_to_provider(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "paper.pdf"
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "Source evidence.")
+    document.save(pdf_path)
+    document.close()
+    extracted = ExtractedPaper("Paper", "Source evidence.", [], [])
+    provider_calls = []
+    payload = {
+        "title": "Paper",
+        "narrative_sections": [{
+            "heading": "Argument",
+            "highlights": [{
+                "id": "h1",
+                "label": "result",
+                "text": "The paper reports a result.",
+                "source": {"type": "text", "anchor": "Source evidence.", "page_hint": 1},
+            }],
+        }],
+        "figures": [],
+    }
+
+    def fake_run_ai(*args, **kwargs):
+        provider_calls.append((args, kwargs))
+        return json.dumps(payload), "codex"
+
+    monkeypatch.setattr(
+        "app.ai.model_capacity_tokens",
+        lambda _model: (_ for _ in ()).throw(AssertionError("analysis must not preflight model capacity")),
+    )
+    monkeypatch.setattr("app.ai.run_ai", fake_run_ai)
+
+    analysis = analyze_paper(pdf_path, extracted, "codex", model="gpt-5.6-sol")
+
+    assert provider_calls
+    assert analysis["narrative_sections"][0]["highlights"][0]["id"] == "h1"
 
 
 def test_normalize_analysis_fails_when_a_highlight_has_no_source():
