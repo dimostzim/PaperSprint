@@ -117,6 +117,43 @@ def test_prepare_visuals_keeps_exact_source_box_separate_from_context_crop(tmp_p
     assert visuals[0]["bbox_pct"][1] > 50
 
 
+def test_prepare_visuals_ignores_page_sized_drawing_union(tmp_path):
+    pdf_path = tmp_path / "paper.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_text((50, 100), "Figure 1 is discussed later.")
+    page.draw_rect(page.rect)
+    doc.save(pdf_path)
+    doc.close()
+    extracted = ExtractedPaper("Paper", "", [{"page_number": 1, "text": "Figure 1 is discussed later."}], [])
+
+    visuals = prepare_visuals(pdf_path, extracted, tmp_path / "figures", "paper-1")
+
+    assert visuals == []
+
+
+def test_prepare_visuals_keeps_full_page_drawing_union_as_context_not_visual(tmp_path):
+    pdf_path = tmp_path / "paper.pdf"
+    image_path = tmp_path / "figure.png"
+    pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 100, 100), False)
+    pixmap.clear_with(200)
+    pixmap.save(image_path)
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    figure_box = fitz.Rect(75, 140, 540, 480)
+    page.insert_image(figure_box, filename=image_path)
+    page.draw_rect(page.rect)
+    doc.save(pdf_path)
+    doc.close()
+    extracted = ExtractedPaper("Paper", "", [{"page_number": 1, "text": "Figure 1: Benchmark result"}], [])
+
+    visuals = prepare_visuals(pdf_path, extracted, tmp_path / "figures", "paper-1")
+
+    assert len(visuals) == 1
+    assert visuals[0]["rects"] == [[75.0, 140.0, 540.0, 480.0]]
+    assert visuals[0]["page_image_path"]
+
+
 def test_prepare_visuals_provides_actual_crop_and_full_page_fallback(tmp_path):
     pdf_path = tmp_path / "paper.pdf"
     doc = fitz.open()

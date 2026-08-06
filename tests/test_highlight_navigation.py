@@ -35,6 +35,20 @@ console.log(JSON.stringify(rects));
     assert payload == [[60, 160, 360, 640]]
 
 
+def test_full_page_source_does_not_become_a_pdf_overlay_rectangle():
+    payload = run_navigation_script(
+        '''
+const rects = highlightSourceRects(
+  { rects: [[0, 0, 600, 800]], source: { type: "figure" } },
+  { width: 600, height: 800 },
+);
+console.log(JSON.stringify(rects));
+'''
+    )
+
+    assert payload == []
+
+
 def test_activating_available_highlight_selects_centers_and_opens_source():
     payload = run_navigation_script(
         '''
