@@ -22,8 +22,6 @@ MAX_HIGHLIGHT_SNIPPET_CHARS = 900  # Manual highlights only.
 MAX_TAKEAWAY_EXCERPT_CHARS = 1600
 MAX_CITATION_VALIDATION_CONTEXTS = 180
 ANALYSIS_VERSION = 17
-ANALYSIS_RESPONSE_RESERVE_TOKENS = 24_000
-ANALYSIS_SAFETY_MARGIN_TOKENS = 8_000
 DYNAMIC_MODEL_CONTEXT_TOKENS: dict[str, int] = {}
 DYNAMIC_MULTIMODAL_MODELS: set[str] = set()
 DEFAULT_DISCOVERED_CONTEXT_TOKENS = 128_000
@@ -404,18 +402,6 @@ def choose_provider(requested: str | None, api_key: str | None = None) -> str:
     return provider
 
 
-class ModelCapacityError(ValueError):
-    def __init__(self, model: str, required_tokens: int, capacity_tokens: int | None):
-        self.model = model
-        self.required_tokens = required_tokens
-        self.capacity_tokens = capacity_tokens
-        capacity = f"{capacity_tokens:,} tokens" if capacity_tokens else "unknown"
-        super().__init__(
-            f"The complete paper requires about {required_tokens:,} input tokens, but {model} has {capacity} capacity. "
-            "Choose a larger-context model and analyze again."
-        )
-
-
 def model_capacity_tokens(model: str | None) -> int | None:
     selected = resolve_text_model(model)
     overrides = os.getenv("MODEL_CONTEXT_TOKENS", "").strip()
@@ -430,44 +416,9 @@ def model_capacity_tokens(model: str | None) -> int | None:
     return DYNAMIC_MODEL_CONTEXT_TOKENS.get(selected) or MODEL_CONTEXT_TOKENS.get(selected) or MODEL_CONTEXT_TOKENS.get(unqualified)
 
 
-def estimate_tokens(value: str) -> int:
-    # Conservative tokenizer-independent estimate suitable for preflight.
-    return (len(value.encode("utf-8")) + 2) // 3
-
-
-def estimate_image_tokens(image_paths: list[Path] | None) -> int:
-    """Conservative tile estimate; unreadable dimensions make capacity unknowable."""
-    import fitz
-
-    total = 0
-    for path in image_paths or []:
-        try:
-            pixmap = fitz.Pixmap(path)
-            tiles = ((pixmap.width + 511) // 512) * ((pixmap.height + 511) // 512)
-        except Exception as error:
-            raise ModelCapacityError(path.name, 0, None) from error
-        total += 512 + tiles * 512
-    return total
-
-
-def analysis_required_tokens(prompt: str, image_paths: list[Path] | None = None) -> int:
-    return estimate_tokens(f"{ANALYSIS_SYSTEM}\n\n{prompt}") + estimate_image_tokens(image_paths) + ANALYSIS_RESPONSE_RESERVE_TOKENS + ANALYSIS_SAFETY_MARGIN_TOKENS
-
-
 def model_supports_multimodal(model: str | None) -> bool:
     selected = resolve_text_model(model)
     return selected in DYNAMIC_MULTIMODAL_MODELS or selected in MODEL_MULTIMODAL or selected.split("/", 1)[-1] in MODEL_MULTIMODAL
-
-
-def validate_analysis_capacity(prompt: str, model: str | None, image_paths: list[Path] | None = None) -> dict[str, int | str]:
-    selected = resolve_text_model(model)
-    required = analysis_required_tokens(prompt, image_paths)
-    capacity = model_capacity_tokens(selected)
-    if not model_supports_multimodal(selected):
-        raise ModelCapacityError(selected, required, capacity)
-    if capacity is None or required > capacity:
-        raise ModelCapacityError(selected, required, capacity)
-    return {"model": selected, "required_tokens": required, "capacity_tokens": capacity}
 
 
 def build_analysis_prompt(extracted: ExtractedPaper, visuals: list[dict[str, Any]] | None = None) -> str:
@@ -876,7 +827,6 @@ def analyze_paper(
         for path in (item.get("image_path"), item.get("page_image_path"))
         if path
     ))
-    validate_analysis_capacity(prompt, model, image_paths)
     output, provider_used = run_ai(
         prompt,
         ANALYSIS_SYSTEM,

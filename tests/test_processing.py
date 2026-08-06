@@ -9,6 +9,7 @@ import pytest
 
 from app.ai import (
     DEFAULT_MODEL,
+    analyze_paper,
     answer_chat,
     build_analysis_prompt,
     build_chat_prompt,
@@ -286,6 +287,45 @@ def test_normalize_analysis_does_not_cap_highlights():
     assert highlights[0]["id"] == "h1"
     assert highlights[0]["text"] == "Synthesized point 0"
     assert "key_takeaways" not in analysis
+
+
+def test_analyze_paper_defers_capacity_validation_to_provider(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "paper.pdf"
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "Source evidence.")
+    document.save(pdf_path)
+    document.close()
+    extracted = ExtractedPaper("Paper", "Source evidence.", [], [])
+    provider_calls = []
+    payload = {
+        "title": "Paper",
+        "narrative_sections": [{
+            "heading": "Argument",
+            "highlights": [{
+                "id": "h1",
+                "label": "result",
+                "text": "The paper reports a result.",
+                "source": {"type": "text", "anchor": "Source evidence.", "page_hint": 1},
+            }],
+        }],
+        "figures": [],
+    }
+
+    def fake_run_ai(*args, **kwargs):
+        provider_calls.append((args, kwargs))
+        return json.dumps(payload), "codex"
+
+    monkeypatch.setattr(
+        "app.ai.model_capacity_tokens",
+        lambda _model: (_ for _ in ()).throw(AssertionError("analysis must not preflight model capacity")),
+    )
+    monkeypatch.setattr("app.ai.run_ai", fake_run_ai)
+
+    analysis = analyze_paper(pdf_path, extracted, "codex", model="gpt-5.6-sol")
+
+    assert provider_calls
+    assert analysis["narrative_sections"][0]["highlights"][0]["id"] == "h1"
 
 
 def test_normalize_analysis_fails_when_a_highlight_has_no_source():
@@ -654,23 +694,32 @@ console.log(JSON.stringify({{ ...state, draft: els.chatInput.value, submissions 
     }
 
 
-def test_highlight_selection_only_adds_an_outline():
+def test_highlight_selection_only_adds_a_strong_outline():
     styles = (Path(__file__).resolve().parents[1] / "static" / "styles.css").read_text(encoding="utf-8")
     active_start = styles.index(".highlight-rect.active {")
     active_end = styles.index("}\n", active_start)
     active_rule = styles[active_start:active_end]
 
     assert "opacity:" not in active_rule
+    assert "box-shadow:" not in active_rule
     assert ".overlay-layer:has(.highlight-rect.active) .highlight-rect:not(.active)" not in styles
     assert ".highlight-rect:hover" not in styles
-    assert "outline: 2px solid var(--accent-strong)" in active_rule
+    assert "outline: 3px solid var(--accent-strong)" in active_rule
+
+
+def test_source_unavailable_highlight_flash_respects_reduced_motion():
+    styles = (Path(__file__).resolve().parents[1] / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert ".highlight-card.source-unavailable-flash" in styles
+    assert "animation: source-unavailable-flash 700ms" in styles
+    assert "@media (prefers-reduced-motion: reduce)" in styles
 
 
 def test_highlight_popover_uses_complete_text_without_truncation():
     root = Path(__file__).resolve().parents[1]
     source = (root / "static" / "app.js").read_text(encoding="utf-8")
     start = source.index("function renderHighlightPopover(highlight)")
-    end = source.index("\n\nfunction showHighlightPopover", start)
+    end = source.index("\n\nfunction openHighlightPopover", start)
     function_source = source[start:end]
 
     assert "briefText(" not in function_source
@@ -684,7 +733,7 @@ def test_highlight_popover_uses_complete_text_without_truncation():
 def test_figure_backed_highlight_offers_visual_attachment_instead_of_text_explanation():
     source = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
     start = source.index("function renderHighlightPopover(highlight)")
-    end = source.index("\n\nfunction showHighlightPopover", start)
+    end = source.index("\n\nfunction openHighlightPopover", start)
     function_source = source[start:end]
 
     assert "data-add-highlight-figure" in function_source

@@ -59,6 +59,11 @@ def page_has_pdf_visuals(page: fitz.Page) -> bool:
     return len(drawings) >= 12
 
 
+def _covers_most_of_page(rect: fitz.Rect, page_rect: fitz.Rect) -> bool:
+    page_area = max(float(page_rect.width * page_rect.height), 1.0)
+    return float(rect.width * rect.height) / page_area >= 0.9
+
+
 def _percent_box(rect: fitz.Rect, page_rect: fitz.Rect) -> list[float]:
     return [
         round(100 * (rect.x0 - page_rect.x0) / page_rect.width, 2),
@@ -101,7 +106,7 @@ def prepare_visuals(
                     if area_ratio >= 0.005 and not in_page_furniture:
                         regions.append(rect)
             try:
-                regions.extend(table.bbox for table in page.find_tables().tables)
+                regions.extend(fitz.Rect(table.bbox) for table in page.find_tables().tables)
             except (AttributeError, RuntimeError, ValueError):
                 pass
             try:
@@ -125,8 +130,13 @@ def prepare_visuals(
             if not regions:
                 continue
 
-            # Disconnected regions and cue-only pages need the complete page as context.
-            include_full_page = len(regions) != 1 or regions[0] == page.rect
+            # A page-sized drawing union is often the PDF canvas or background, not a
+            # second visual. Keep the page pixels as context for localized visuals
+            # without exposing the page itself as a highlight source.
+            include_full_page = len(regions) != 1 or any(_covers_most_of_page(region, page.rect) for region in regions)
+            regions = [region for region in regions if not _covers_most_of_page(region, page.rect)]
+            if not regions:
+                continue
             for region_index, region in enumerate(regions, start=1):
                 expanded = fitz.Rect(region.x0 - 18, region.y0 - 36, region.x1 + 18, region.y1 + 72) & page.rect
                 visual_id = f"p{page_number}-{region_index}"

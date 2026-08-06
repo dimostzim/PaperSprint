@@ -460,6 +460,36 @@ def test_upload_uses_cached_completed_analysis(tmp_path, monkeypatch):
     assert (papers_dir / f"{digest[:12]}-paper.pdf").exists()
 
 
+def test_public_paper_keeps_figure_bbox_source_navigable():
+    payload = main.public_paper(
+        {
+            "id": "paper-1",
+            "filename": "paper.pdf",
+            "title": "Paper",
+            "narrative_sections": [
+                {
+                    "heading": "Results",
+                    "highlights": [
+                        {
+                            "id": "figure-result",
+                            "text": "The chart shows the main result.",
+                            "label": "result",
+                            "page_number": 2,
+                            "rects": [],
+                            "source": {"type": "figure", "bbox_pct": [10, 20, 60, 80]},
+                        }
+                    ],
+                }
+            ],
+            "figures": [],
+            "citations": [],
+        },
+        include_details=True,
+    )
+
+    assert payload["highlights"][0]["navigation_available"] is True
+
+
 def test_public_paper_counts_only_citations_with_contexts():
     payload = main.public_paper(
         {
@@ -1120,7 +1150,7 @@ def test_public_paper_preserves_narrative_order_and_excludes_manual_highlights()
     assert "reading_depth" not in payload
 
 
-def test_analysis_capacity_error_does_not_mutate_paper_or_schedule_model(tmp_path, monkeypatch):
+def test_analysis_request_defers_capacity_validation_to_provider(tmp_path, monkeypatch):
     papers_dir = tmp_path / "papers"
     papers_dir.mkdir()
     pdf_path = papers_dir / "paper.pdf"
@@ -1133,17 +1163,58 @@ def test_analysis_capacity_error_does_not_mutate_paper_or_schedule_model(tmp_pat
         "narrative_sections": [], "manual_highlights": [], "figures": [], "citations": [],
     }
     scheduled = []
-    monkeypatch.setattr(main.asyncio, "create_task", lambda task: scheduled.append(task))
-    monkeypatch.setattr("app.ai.model_capacity_tokens", lambda _model: 100)
+
+    def schedule(task):
+        task.close()
+        scheduled.append(task)
+
+    monkeypatch.setattr(main.asyncio, "create_task", schedule)
+    monkeypatch.setattr(
+        main,
+        "model_capacity_tokens",
+        lambda _model: (_ for _ in ()).throw(AssertionError("analysis must not preflight model capacity")),
+    )
 
     response = TestClient(main.app).post("/api/papers/paper-1/analyze", json={"provider": "codex", "model": "small-model"})
 
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "model_capacity_exceeded"
-    assert main.PAPERS["paper-1"]["analysis_status"] == "ready"
-    assert main.PAPERS["paper-1"]["overview"] == "Ready."
-    assert scheduled == []
+    assert response.status_code == 200
+    assert response.json()["analysis_status"] == "analyzing"
+    assert main.PAPERS["paper-1"]["analysis_status"] == "analyzing"
+    assert len(scheduled) == 1
 
+
+
+def test_provider_rejection_marks_initial_analysis_as_failed(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(make_pdf_bytes("Source evidence."))
+    main.PAPERS.clear()
+    main.PAPERS["paper-1"] = {
+        "id": "paper-1",
+        "filename": "paper.pdf",
+        "stored_pdf": "paper.pdf",
+        "title": "Paper",
+        "analysis_status": "analyzing",
+        "analysis_error": "",
+    }
+    monkeypatch.setattr(
+        main,
+        "analyze_paper",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("provider context limit exceeded")),
+    )
+
+    main.finish_paper_analysis(
+        pdf_path,
+        "paper-1",
+        "paper.pdf",
+        "codex",
+        "digest",
+        prepared_extracted=main.extract_pdf(pdf_path),
+        prepared_visuals=[],
+    )
+
+    paper = main.PAPERS["paper-1"]
+    assert paper["analysis_status"] == "error"
+    assert paper["analysis_error"] == "provider context limit exceeded"
 
 
 def test_chat_requires_successful_analysis(monkeypatch):

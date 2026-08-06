@@ -632,8 +632,10 @@ button:disabled {
 }
 
 .library-panel {
+  display: flex;
+  flex-direction: column;
   border-right: 1px solid var(--line);
-  overflow: auto;
+  overflow: hidden;
 }
 
 .assistant-panel {
@@ -764,6 +766,7 @@ h2 {
 
 .paper-list {
   display: grid;
+  flex: 0 0 auto;
   gap: 5px;
   max-height: 190px;
   overflow-y: auto;
@@ -772,8 +775,12 @@ h2 {
 }
 
 .highlight-list {
+  min-height: 0;
   display: grid;
+  flex: 1 1 auto;
   gap: 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 0 12px 14px;
 }
 
@@ -799,9 +806,12 @@ h2 {
 
 .highlight-navigation {
   display: grid;
+  flex: 0 0 auto;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
-  padding: 0 12px 10px;
+  border-top: 1px solid var(--line);
+  padding: 10px 12px 12px;
+  background: var(--panel);
 }
 
 .narrative-heading {
@@ -925,6 +935,27 @@ h2 {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+.highlight-card.source-unavailable-flash {
+  animation: source-unavailable-flash 700ms ease-out;
+}
+
+@keyframes source-unavailable-flash {
+  0%, 100% {
+    border-color: var(--accent);
+    background: var(--panel);
+  }
+  45% {
+    border-color: var(--accent-strong);
+    background: var(--facet-bg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .highlight-card.source-unavailable-flash {
+    animation: none;
+  }
+}
+
 .paper-card strong {
   overflow: hidden;
   font-size: 12px;
@@ -972,6 +1003,11 @@ h2 {
 }
 
 .highlights-section {
+  min-height: 0;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
   border-top: 1px solid var(--line);
 }
 
@@ -1224,10 +1260,13 @@ h2 {
   cursor: pointer;
 }
 
+.highlight-rect.figure-source {
+  opacity: 0.05;
+}
+
 .highlight-rect.active {
   z-index: 4;
-  outline: 2px solid var(--accent-strong);
-  box-shadow: 0 0 0 1px var(--panel);
+  outline: 3px solid var(--accent-strong);
 }
 
 .highlight-rect.label-goal,
