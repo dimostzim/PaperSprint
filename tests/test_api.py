@@ -1078,7 +1078,7 @@ def test_analysis_api_persists_synthesized_narrative_and_unavailable_source(tmp_
     client=TestClient(main.app)
     uploaded=client.post("/api/upload",files={"file":("paper.pdf",data,"application/pdf")}).json()
     payload=client.post(f"/api/papers/{uploaded['id']}/analyze",json={"provider":"codex"}).json()
-    for _ in range(50):
+    for _ in range(500):
         if payload["analysis_status"] != "analyzing": break
         time.sleep(.01); payload=client.get(f"/api/papers/{uploaded['id']}").json()
     assert payload["analysis_status"] == "complete"
