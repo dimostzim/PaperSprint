@@ -101,7 +101,7 @@ def prepare_visuals(
                     if area_ratio >= 0.005 and not in_page_furniture:
                         regions.append(rect)
             try:
-                regions.extend(table.bbox for table in page.find_tables().tables)
+                regions.extend(fitz.Rect(table.bbox) for table in page.find_tables().tables)
             except (AttributeError, RuntimeError, ValueError):
                 pass
             try:
